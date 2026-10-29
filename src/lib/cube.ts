@@ -1,5 +1,4 @@
 import type { CubeArray, HyperCube } from '../types';
-import { dtypeOf } from './dtypes';
 
 export function isValid(v: number, noData: number | undefined): boolean {
   return Number.isFinite(v) && v !== noData;
@@ -48,23 +47,10 @@ export function covers(cube: HyperCube, fromNm: number, toNm: number): boolean {
 }
 
 /** X values for plots: wavelengths when they are usable (strictly increasing), else 1-based band numbers. */
-export function spectralAxis(cube: HyperCube): { values: number[]; label: string; isWavelength: boolean } {
+export function spectralAxis(cube: HyperCube): { values: number[]; label: string } {
   const wl = cube.wavelengths;
   if (wl && wl.every((v, i) => i === 0 || v > wl[i - 1])) {
-    return { values: wl, label: `Wavelength${cube.wavelengthUnits ? ` (${cube.wavelengthUnits})` : ''}`, isWavelength: true };
+    return { values: wl, label: `Wavelength${cube.wavelengthUnits ? ` (${cube.wavelengthUnits})` : ''}` };
   }
-  return { values: Array.from({ length: cube.bands }, (_, i) => i + 1), label: 'Band', isWavelength: false };
-}
-
-export function bandLabel(cube: HyperCube, b: number): string {
-  const wl = cube.wavelengths?.[b];
-  const name = cube.bandNames?.[b];
-  const parts = [`Band ${b + 1}`];
-  if (wl !== undefined) parts.push(`${+wl.toFixed(2)} ${cube.wavelengthUnits ?? ''}`.trim());
-  else if (name) parts.push(name);
-  return parts.join(' · ');
-}
-
-export function describeCube(cube: HyperCube): string {
-  return `${cube.width} × ${cube.height} px · ${cube.bands} bands · ${dtypeOf(cube.data)}`;
+  return { values: Array.from({ length: cube.bands }, (_, i) => i + 1), label: 'Band' };
 }

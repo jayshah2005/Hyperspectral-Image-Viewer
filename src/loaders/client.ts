@@ -35,7 +35,7 @@ export async function loadCandidate(id: string, axes: Axes | null) {
   try {
     const cube = await worker().load(id, axes ?? undefined);
     setCube(cube);
-    set({ current: { id, axes }, loading: null });
+    set({ loading: null });
   } catch (e) {
     set({ loading: null, error: message(e) });
   }
@@ -47,6 +47,6 @@ export function loadDemo() {
   // Let the spinner paint before the synchronous generation.
   setTimeout(() => {
     setCube(makeDemoCube());
-    set({ loading: null, candidates: [], current: null, sourceName: 'demo' });
+    set({ loading: null, candidates: [], sourceName: 'demo' });
   }, 30);
 }

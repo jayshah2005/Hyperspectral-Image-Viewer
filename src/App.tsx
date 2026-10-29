@@ -3,18 +3,14 @@ import { useStore } from './store';
 import { loadDemo, openFiles } from './loaders/client';
 import { ImageCanvas } from './components/ImageCanvas';
 import { SpectrumPlot } from './components/SpectrumPlot';
-import { DisplayControls } from './components/DisplayControls';
-import { PinnedList } from './components/PinnedList';
-import { AnalysisPanel } from './components/AnalysisPanel';
-import { StatusBar } from './components/StatusBar';
 import { DatasetPicker } from './components/DatasetPicker';
 
 const FORMATS = [
-  ['ENVI', '.hdr + .img / .raw / .dat / .bsq / .bil / .bip — select both files'],
-  ['MATLAB', '.mat (v5 – v7.3), e.g. Indian Pines, Pavia, Salinas'],
+  ['ENVI', '.hdr + its data file (.img / .raw / .dat / …) — select both'],
+  ['MATLAB', '.mat (v5 – v7.3)'],
   ['NumPy', '.npy (3-D array)'],
   ['HDF5', '.h5 / .hdf5 / .he5 / .nc (NetCDF-4)'],
-  ['GeoTIFF', 'multi-band .tif / .tiff, or a multi-page band stack'],
+  ['GeoTIFF', 'multi-band .tif / .tiff'],
 ];
 
 function useGlobalDrop() {
@@ -55,37 +51,15 @@ function useGlobalDrop() {
   return over;
 }
 
-/** ←/→ step through bands (switching to single-band view). */
-function useBandKeys() {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const t = e.target as HTMLElement;
-      if (t.closest('input, select, textarea')) return;
-      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-      const s = useStore.getState();
-      if (!s.cube) return;
-      const step = (e.key === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? 10 : 1);
-      s.set({ mode: 'single', showDerived: false, band: Math.min(s.cube.bands - 1, Math.max(0, s.band + step)) });
-      e.preventDefault();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
-}
-
 export default function App() {
   const cube = useStore((s) => s.cube);
   const cubeId = useStore((s) => s.cubeId);
   const loading = useStore((s) => s.loading);
   const error = useStore((s) => s.error);
   const pickerOpen = useStore((s) => s.pickerOpen);
-  const candidates = useStore((s) => s.candidates);
   const set = useStore((s) => s.set);
   const inputRef = useRef<HTMLInputElement>(null);
   const dragOver = useGlobalDrop();
-  useBandKeys();
-
-  const canReorient = candidates.length > 1 || candidates.some((c) => c.defaultAxes);
   const pick = () => inputRef.current?.click();
 
   return (
@@ -98,9 +72,12 @@ export default function App() {
           </svg>
           <span>Hyperspectral Viewer</span>
         </div>
-        {cube && <span className="cube-name" title={cube.name}>{cube.name}</span>}
+        {cube && (
+          <span className="cube-name" title={cube.name}>
+            {cube.name} · {cube.width} × {cube.height} px · {cube.bands} bands
+          </span>
+        )}
         <span className="spacer" />
-        {cube && canReorient && <button onClick={() => set({ pickerOpen: true })}>Dataset & axes…</button>}
         <button onClick={loadDemo}>Demo cube</button>
         <button className="primary" onClick={pick}>
           Open files…
@@ -130,17 +107,7 @@ export default function App() {
       {cube ? (
         <main className="workspace" key={cubeId}>
           <ImageCanvas />
-          <aside className="sidebar">
-            <section className="panel spectrum-panel">
-              <h2>Spectrum</h2>
-              <SpectrumPlot />
-            </section>
-            <div className="sidebar-scroll">
-              <PinnedList />
-              <DisplayControls />
-              <AnalysisPanel />
-            </div>
-          </aside>
+          <SpectrumPlot />
         </main>
       ) : (
         <main className="empty">
@@ -159,19 +126,11 @@ export default function App() {
               ))}
             </dl>
           </div>
-          <button
-            className="demo-link"
-            onClick={(e) => {
-              e.stopPropagation();
-              loadDemo();
-            }}
-          >
+          <button className="demo-link" onClick={loadDemo}>
             No data at hand? Load a synthetic demo cube →
           </button>
         </main>
       )}
-
-      <StatusBar />
 
       {pickerOpen && <DatasetPicker />}
       {dragOver && <div className="drop-overlay">Drop to open</div>}

@@ -1,71 +1,37 @@
 import type { HyperCube } from '../types';
-import type { Derived, DisplayMode } from '../store';
-import { colormapLUT, type ColormapName } from './colormaps';
-import { getBand } from './cube';
-import { renderMapped, renderRGB, type Channel } from './render';
+import { covers, getBand, nearestBand, nmToCubeUnits } from './cube';
+import { renderRGB, type Channel } from './render';
 import { sortedSample, stretchRange } from './stretch';
 
-const bandSamples = new WeakMap<HyperCube, Map<number, Float64Array>>();
-const derivedSamples = new WeakMap<Float32Array, Float64Array>();
-
-function bandSample(cube: HyperCube, b: number): Float64Array {
-  let m = bandSamples.get(cube);
-  if (!m) bandSamples.set(cube, (m = new Map()));
-  let s = m.get(b);
-  if (!s) m.set(b, (s = sortedSample(getBand(cube, b), cube.noDataValue)));
-  return s;
+/**
+ * Bands for the RGB view: the file's default bands if it names them, natural colour
+ * (640/550/470 nm) when the wavelengths cover the visible range, else bands spread across the cube.
+ */
+export function rgbBands(cube: HyperCube): [number, number, number] {
+  if (cube.defaultBands?.every((b) => b >= 0 && b < cube.bands)) return cube.defaultBands;
+  if (covers(cube, 460, 640)) {
+    return [640, 550, 470].map((nm) => nearestBand(cube, nmToCubeUnits(cube, nm))) as [number, number, number];
+  }
+  const B = cube.bands - 1;
+  return [Math.round(B * 0.75), Math.round(B * 0.5), Math.round(B * 0.25)];
 }
 
-export interface DisplayParams {
-  mode: DisplayMode;
-  band: number;
-  rgb: [number, number, number];
-  colormap: ColormapName;
-  lowPct: number;
-  highPct: number;
-  gamma: number;
-  derived: Derived | null;
-  showDerived: boolean;
-}
-
-export interface DisplayImage {
-  canvas: HTMLCanvasElement;
-  /** Value range mapped to the colour scale (single-band and derived views). */
-  range: [number, number] | null;
-  colormap: ColormapName | null;
-}
-
-/** Render the current view of the cube into an offscreen canvas at native resolution. */
-export function renderDisplay(cube: HyperCube, p: DisplayParams): DisplayImage {
+/** Render the RGB composite (2–98% percentile stretch per channel) into a native-resolution canvas. */
+export function renderRgbImage(cube: HyperCube): HTMLCanvasElement {
   const { width, height } = cube;
-  const pixels = width * height;
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext('2d')!;
   const img = ctx.createImageData(width, height);
 
-  let range: [number, number] | null = null;
-  let colormap: ColormapName | null = null;
-
-  if (p.showDerived && p.derived) {
-    let s = derivedSamples.get(p.derived.data);
-    if (!s) derivedSamples.set(p.derived.data, (s = sortedSample(p.derived.data)));
-    range = stretchRange(s, p.lowPct, p.highPct);
-    colormap = p.derived.colormap;
-    renderMapped({ values: p.derived.data, lo: range[0], hi: range[1] }, pixels, colormapLUT(colormap), p.gamma, undefined, img.data);
-  } else if (p.mode === 'single') {
-    range = stretchRange(bandSample(cube, p.band), p.lowPct, p.highPct);
-    colormap = p.colormap;
-    renderMapped({ values: getBand(cube, p.band), lo: range[0], hi: range[1] }, pixels, colormapLUT(p.colormap), p.gamma, cube.noDataValue, img.data);
-  } else {
-    const channels = p.rgb.map((b): Channel => {
-      const [lo, hi] = stretchRange(bandSample(cube, b), p.lowPct, p.highPct);
-      return { values: getBand(cube, b), lo, hi };
-    }) as unknown as [Channel, Channel, Channel];
-    renderRGB(channels, pixels, p.gamma, cube.noDataValue, img.data);
-  }
+  const channels = rgbBands(cube).map((b): Channel => {
+    const values = getBand(cube, b);
+    const [lo, hi] = stretchRange(sortedSample(values, cube.noDataValue), 2, 98);
+    return { values, lo, hi };
+  }) as unknown as [Channel, Channel, Channel];
+  renderRGB(channels, width * height, cube.noDataValue, img.data);
 
   ctx.putImageData(img, 0, 0);
-  return { canvas, range, colormap };
+  return canvas;
 }
