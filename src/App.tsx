@@ -127,7 +127,7 @@ export default function App() {
             </dl>
           </div>
           <button className="demo-link" onClick={loadDemo}>
-            No data at hand? Load a synthetic demo cube →
+            No data at hand? Load a demo cube of a vine row →
           </button>
         </main>
       )}

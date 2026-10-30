@@ -12,6 +12,8 @@ interface State {
   error: string | null;
   /** The clicked pixel whose spectrum is plotted. */
   selected: { x: number; y: number } | null;
+  /** The pixel under the mouse; its spectrum is plotted while nothing is selected. */
+  hovered: { x: number; y: number } | null;
 
   set: (patch: Partial<State>) => void;
   setCube: (cube: HyperCube) => void;
@@ -26,7 +28,8 @@ export const useStore = create<State>((set, get) => ({
   loading: null,
   error: null,
   selected: null,
+  hovered: null,
 
   set: (patch) => set(patch),
-  setCube: (cube) => set({ cube, cubeId: get().cubeId + 1, selected: null, error: null }),
+  setCube: (cube) => set({ cube, cubeId: get().cubeId + 1, selected: null, hovered: null, error: null }),
 }));

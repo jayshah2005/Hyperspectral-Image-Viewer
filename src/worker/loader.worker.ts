@@ -6,6 +6,7 @@ import { openH5, type H5Handle } from '../loaders/hdf5';
 import { isMat73, parseMatV5, type MatVariable } from '../loaders/mat';
 import { parseNpy, readNpyHeader } from '../loaders/npy';
 import { fromArrayBuffer } from 'geotiff';
+import { gunzipSync } from 'fflate';
 import type { Axes, Candidate, HyperCube, NdArray, OpenResult } from '../types';
 
 type Source =
@@ -160,6 +161,67 @@ async function load(id: string, axes?: Axes): Promise<HyperCube> {
   return Comlink.transfer(cube, [cube.data.buffer as ArrayBuffer]);
 }
 
-const api = { open, load };
+async function fetchOk(url: string) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Could not download ${url} (HTTP ${res.status}).`);
+  return res;
+}
+
+/** Read a response body chunk by chunk, reporting each chunk's size. */
+async function readBody(res: Response, onBytes: (n: number) => void): Promise<Uint8Array> {
+  const reader = res.body!.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    length += value.length;
+    onBytes(value.length);
+  }
+  const out = new Uint8Array(length);
+  let at = 0;
+  for (const c of chunks) {
+    out.set(c, at);
+    at += c.length;
+  }
+  return out;
+}
+
+/** Progress of a download: bytes so far and the total, when the server reports sizes. */
+export type DownloadProgress = (loaded: number, total: number | null) => void;
+
+/**
+ * Download an ENVI cube whose data file is split into gzipped parts (used for the bundled demo).
+ * The parts are consecutive byte ranges of the data file, so they are joined in order after gunzip.
+ */
+async function loadRemoteEnvi(headerUrl: string, dataUrls: string[], name: string, onProgress?: DownloadProgress): Promise<HyperCube> {
+  closeSource();
+  const responses = await Promise.all(dataUrls.map(fetchOk));
+  const sizes = responses.map((r) => Number(r.headers.get('content-length')));
+  const total = sizes.every((n) => n > 0) ? sizes.reduce((a, b) => a + b, 0) : null;
+  let loaded = 0;
+  const [header, ...parts] = await Promise.all([
+    fetchOk(headerUrl).then((r) => r.text()),
+    ...responses.map((r) =>
+      readBody(r, (n) => {
+        loaded += n;
+        onProgress?.(loaded, total);
+      }),
+    ),
+  ]);
+  // Some servers already decode .gz (Content-Encoding: gzip), so only gunzip when the magic bytes are there.
+  const raw = parts.map((p) => (p[0] === 0x1f && p[1] === 0x8b ? gunzipSync(p) : p));
+  const data = new Uint8Array(raw.reduce((a, p) => a + p.length, 0));
+  let at = 0;
+  for (const p of raw) {
+    data.set(p, at);
+    at += p.length;
+  }
+  const cube = parseEnvi(header, data.buffer, name);
+  return Comlink.transfer(cube, [cube.data.buffer as ArrayBuffer]);
+}
+
+const api = { open, load, loadRemoteEnvi };
 export type LoaderApi = typeof api;
 Comlink.expose(api);

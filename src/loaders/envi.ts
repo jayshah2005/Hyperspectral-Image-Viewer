@@ -16,6 +16,8 @@ export interface EnviHeader {
   badBands?: boolean[];
   noDataValue?: number;
   defaultBands?: [number, number, number];
+  /** ENVI `reflectance scale factor`: stored value / factor = reflectance. */
+  reflectanceScale?: number;
 }
 
 const ENVI_TYPES: Record<number, DType> = {
@@ -78,6 +80,7 @@ export function parseEnviHeader(text: string): EnviHeader {
   const bbl = numList(f.get('bbl'));
   const defaultBands = numList(f.get('default bands'));
   const ignore = f.get('data ignore value');
+  const scale = Number(f.get('reflectance scale factor'));
 
   return {
     samples,
@@ -94,6 +97,7 @@ export function parseEnviHeader(text: string): EnviHeader {
     noDataValue: ignore !== undefined && Number.isFinite(Number(ignore)) ? Number(ignore) : undefined,
     defaultBands:
       defaultBands?.length === 3 ? (defaultBands.map((b) => b - 1) as [number, number, number]) : undefined,
+    reflectanceScale: Number.isFinite(scale) && scale > 0 && scale !== 1 ? scale : undefined,
   };
 }
 
@@ -109,6 +113,9 @@ export function parseEnvi(headerText: string, data: ArrayBuffer, name: string): 
   const raw = readTyped(data, h.headerOffset, count, h.dtype, h.littleEndian);
   const { shape, axes } = INTERLEAVE_LAYOUT[h.interleave](h);
   const bsq = toBSQ({ data: raw, shape, order: 'C' }, axes);
+  const k = h.reflectanceScale;
+  // Scaled integers (e.g. reflectance x 10000) become float reflectance, as the header defines.
+  if (k) bsq.data = Float32Array.from(bsq.data, (v) => v / k);
   return {
     name,
     ...bsq,
@@ -116,7 +123,7 @@ export function parseEnvi(headerText: string, data: ArrayBuffer, name: string): 
     wavelengthUnits: h.wavelengthUnits,
     bandNames: h.bandNames,
     badBands: h.badBands,
-    noDataValue: h.noDataValue,
+    noDataValue: k && h.noDataValue !== undefined ? Math.fround(h.noDataValue / k) : h.noDataValue,
     defaultBands: h.defaultBands,
   };
 }

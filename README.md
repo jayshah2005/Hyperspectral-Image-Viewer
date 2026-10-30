@@ -11,7 +11,7 @@ npm install
 npm run dev        # http://localhost:5173
 ```
 
-No data at hand? Click **Demo cube** for a synthetic scene (400–2500 nm, 150 bands).
+No data at hand? Click **Demo cube** to load a real Specim IQ capture of a vine row with a white reference panel (397–1004 nm, 204 bands). It is the full 512 × 512 px cube, rotated upright, stored in `public/demo/` as an ENVI file in two gzipped halves (about 65 MB to download).
 
 | Command           | What it does                               |
 | ----------------- | ------------------------------------------ |
@@ -26,14 +26,14 @@ Requires Node 18+.
 
 - **Open:** use **Open files…** or drag files onto the page. For ENVI, select the `.hdr` together with its data file.
 - **Image:** shown as an RGB composite. The bands come from the file's `default bands` if it has them, otherwise 640/550/470 nm when the wavelengths cover the visible range, otherwise bands spread across the cube.
-- **Pixel spectrum:** click a pixel to plot its spectrum. Hover the plot to read the exact wavelength and value. Drag across the plot to zoom; double-click it to reset.
+- **Pixel spectrum:** hover over the image to preview each pixel's spectrum; click a pixel to keep its spectrum. Hover the plot to read the exact wavelength and value. Drag across the plot to zoom; double-click it to reset.
 - **Navigate:** drag the image to pan, scroll to zoom, double-click to fit.
 
 ## Supported formats
 
 | Format  | Files | Notes |
 | ------- | ----- | ----- |
-| ENVI    | `.hdr` + data file (`.img`, `.raw`, `.dat`, `.bsq`, `.bil`, `.bip`, or no extension) | BSQ/BIL/BIP, both byte orders, header offset, data types 1–5 and 12–15. Uses `wavelength`, `bbl` and `data ignore value`. |
+| ENVI    | `.hdr` + data file (`.img`, `.raw`, `.dat`, `.bsq`, `.bil`, `.bip`, or no extension) | BSQ/BIL/BIP, both byte orders, header offset, data types 1–5 and 12–15. Uses `wavelength`, `bbl`, `data ignore value` and `reflectance scale factor`. |
 | MATLAB  | `.mat` v5–v7.3 | If the file has several 3-D arrays, you pick one. A `wavelength*`/`lambda`/`wl` vector is used as the x-axis. |
 | NumPy   | `.npy` | 3-D arrays, C or Fortran order. |
 | HDF5    | `.h5`, `.hdf5`, `.he5`, `.nc` (NetCDF-4) | Same array picking and wavelength detection as MATLAB. |

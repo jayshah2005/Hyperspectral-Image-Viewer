@@ -55,6 +55,16 @@ describe('ENVI', () => {
     }
   }
 
+  it('applies the reflectance scale factor', () => {
+    const cube = parseEnvi(header('interleave = bsq\nreflectance scale factor = 1000'), encode('bsq', 0, true), 't');
+    expect(cube.data).toBeInstanceOf(Float32Array);
+    expect(cube.noDataValue).toBeCloseTo(-9.999);
+    expect(getSpectrum(cube, 1, 2)[3]).toBeCloseTo(cubeValue(2, 1, 3) / 1000);
+    // The no-data value is scaled too, so masked pixels still drop out of the spectrum.
+    cube.data[3 * W * H] = cube.noDataValue!;
+    expect(getSpectrum(cube, 0, 0)[3]).toBeNaN();
+  });
+
   it('rejects truncated data', () => {
     expect(() => parseEnvi(header('interleave = bsq'), new ArrayBuffer(10), 't')).toThrow(/too small/);
   });

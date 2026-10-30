@@ -14,10 +14,12 @@ const LEGEND_H = 30;
 const toSeries = (a: ArrayLike<number> | null, n: number): (number | null)[] =>
   Array.from({ length: n }, (_, i) => (a && Number.isFinite(a[i]) ? a[i] : null));
 
-/** Spectrum of the selected pixel. */
+/** Spectrum of the selected pixel, or of the hovered one while nothing is selected. */
 export function SpectrumPlot() {
   const cube = useStore((s) => s.cube)!;
   const selected = useStore((s) => s.selected);
+  const hovered = useStore((s) => s.hovered);
+  const shown = selected ?? hovered;
   const wrapRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
   const axis = useMemo(() => spectralAxis(cube), [cube]);
@@ -41,7 +43,7 @@ export function SpectrumPlot() {
         ],
         series: [{ label: axis.label }, { label: 'Value', stroke: LINE, width: 2, spanGaps: false, points: { show: false } }],
       },
-      data(useStore.getState().selected),
+      data(shown),
       wrap,
     );
     plotRef.current = u;
@@ -62,14 +64,20 @@ export function SpectrumPlot() {
   }, []);
 
   useEffect(() => {
-    plotRef.current?.setData(data(selected));
+    plotRef.current?.setData(data(shown));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected]);
+  }, [shown?.x, shown?.y]);
 
   return (
     <section className="spectrum">
       <div className="spectrum-head">
-        <h2>{selected ? `Spectrum at pixel (${selected.x}, ${selected.y})` : 'Spectrum'}</h2>
+        <h2>
+          {selected
+            ? `Spectrum at pixel (${selected.x}, ${selected.y})`
+            : hovered
+              ? `Pixel (${hovered.x}, ${hovered.y}) · click to keep`
+              : 'Spectrum'}
+        </h2>
         {selected && (
           <button onClick={() => useStore.getState().set({ selected: null })} title="Deselect pixel (Esc)">
             Clear
@@ -77,7 +85,7 @@ export function SpectrumPlot() {
         )}
       </div>
       <div className="spectrum-plot" ref={wrapRef}>
-        {!selected && <div className="plot-empty">Click a pixel in the image to see its spectrum</div>}
+        {!shown && <div className="plot-empty">Hover over the image to see a pixel's spectrum; click to keep it</div>}
       </div>
     </section>
   );

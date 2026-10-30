@@ -106,6 +106,19 @@ export function ImageCanvas() {
     return { sx: e.clientX - r.left, sy: e.clientY - r.top };
   };
 
+  /** Image pixel under a canvas point, or null outside the image. */
+  const pixelAt = (sx: number, sy: number) => {
+    const { zoom, ox, oy } = view.current;
+    const x = Math.floor((sx - ox) / zoom);
+    const y = Math.floor((sy - oy) / zoom);
+    return x < 0 || y < 0 || x >= cube.width || y >= cube.height ? null : { x, y };
+  };
+
+  const setHovered = (p: { x: number; y: number } | null) => {
+    const { hovered, set } = useStore.getState();
+    if (p?.x !== hovered?.x || p?.y !== hovered?.y) set({ hovered: p });
+  };
+
   const onPointerDown = (e: React.PointerEvent) => {
     canvasRef.current!.setPointerCapture(e.pointerId);
     drag.current = { ...local(e), start: { ...view.current }, moved: false };
@@ -113,8 +126,11 @@ export function ImageCanvas() {
 
   const onPointerMove = (e: React.PointerEvent) => {
     const d = drag.current;
-    if (!d) return;
     const { sx, sy } = local(e);
+    if (!d) {
+      setHovered(pixelAt(sx, sy));
+      return;
+    }
     if (Math.hypot(sx - d.sx, sy - d.sy) > 3) d.moved = true;
     if (d.moved) {
       view.current = { ...d.start, ox: d.start.ox + sx - d.sx, oy: d.start.oy + sy - d.sy };
@@ -126,10 +142,9 @@ export function ImageCanvas() {
     const d = drag.current;
     drag.current = null;
     if (!d || d.moved || e.button !== 0) return;
-    const { zoom, ox, oy } = view.current;
-    const x = Math.floor((d.sx - ox) / zoom);
-    const y = Math.floor((d.sy - oy) / zoom);
-    if (x < 0 || y < 0 || x >= cube.width || y >= cube.height) return;
+    const p = pixelAt(d.sx, d.sy);
+    if (!p) return;
+    const { x, y } = p;
     const { selected, set } = useStore.getState();
     // Clicking the selected pixel again deselects it.
     set({ selected: selected?.x === x && selected?.y === y ? null : { x, y } });
@@ -142,9 +157,10 @@ export function ImageCanvas() {
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
+        onPointerLeave={() => setHovered(null)}
         onDoubleClick={fit}
       />
-      <div className="hint">Click a pixel (again or Esc to deselect) · drag to pan · scroll to zoom · double-click to fit</div>
+      <div className="hint">Hover to preview · click to keep (again or Esc to deselect) · drag to pan · scroll to zoom · double-click to fit</div>
     </div>
   );
 }
