@@ -129,7 +129,10 @@ export function ImageCanvas() {
     const { zoom, ox, oy } = view.current;
     const x = Math.floor((d.sx - ox) / zoom);
     const y = Math.floor((d.sy - oy) / zoom);
-    if (x >= 0 && y >= 0 && x < cube.width && y < cube.height) useStore.getState().set({ selected: { x, y } });
+    if (x < 0 || y < 0 || x >= cube.width || y >= cube.height) return;
+    const { selected, set } = useStore.getState();
+    // Clicking the selected pixel again deselects it.
+    set({ selected: selected?.x === x && selected?.y === y ? null : { x, y } });
   };
 
   return (
@@ -141,7 +144,7 @@ export function ImageCanvas() {
         onPointerUp={onPointerUp}
         onDoubleClick={fit}
       />
-      <div className="hint">Click a pixel · drag to pan · scroll to zoom · double-click to fit</div>
+      <div className="hint">Click a pixel (again or Esc to deselect) · drag to pan · scroll to zoom · double-click to fit</div>
     </div>
   );
 }

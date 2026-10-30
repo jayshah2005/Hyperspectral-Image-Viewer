@@ -56,13 +56,26 @@ export function SpectrumPlot() {
   }, [cube, axis]);
 
   useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && useStore.getState().set({ selected: null });
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  useEffect(() => {
     plotRef.current?.setData(data(selected));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected]);
 
   return (
     <section className="spectrum">
-      <h2>{selected ? `Spectrum at pixel (${selected.x}, ${selected.y})` : 'Spectrum'}</h2>
+      <div className="spectrum-head">
+        <h2>{selected ? `Spectrum at pixel (${selected.x}, ${selected.y})` : 'Spectrum'}</h2>
+        {selected && (
+          <button onClick={() => useStore.getState().set({ selected: null })} title="Deselect pixel (Esc)">
+            Clear
+          </button>
+        )}
+      </div>
       <div className="spectrum-plot" ref={wrapRef}>
         {!selected && <div className="plot-empty">Click a pixel in the image to see its spectrum</div>}
       </div>

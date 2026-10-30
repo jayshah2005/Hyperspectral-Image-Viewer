@@ -240,6 +240,13 @@ button:focus-visible,
   min-height: 0;
   background: var(--surface-1);
 }
+.spectrum-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 28px;
+}
 .spectrum h2 {
   font-size: 14px;
   font-weight: 600;
