@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from './store';
-import { loadDemo, openFiles } from './loaders/client';
+import { importMaskFiles, loadDemo, openFiles } from './loaders/client';
 import { ImageCanvas } from './components/ImageCanvas';
 import { SpectrumPlot } from './components/SpectrumPlot';
 import { DatasetPicker } from './components/DatasetPicker';
+import { ModelNotice } from './components/ModelNotice';
+import { ObjectEditor } from './components/ObjectEditor';
+import { RegionsPanel } from './components/RegionsPanel';
+import { Toolbar } from './components/Toolbar';
 
 const FORMATS = [
   ['ENVI', '.hdr + its data file (.img / .raw / .dat / …) — select both'],
@@ -35,7 +39,11 @@ function useGlobalDrop() {
       depth = 0;
       setOver(false);
       const files = Array.from(e.dataTransfer?.files ?? []);
-      if (files.length) openFiles(files);
+      if (!files.length) return;
+      const s = useStore.getState();
+      if (s.editor) s.notify('Close the editor first.');
+      else if (s.cube && files.every((f) => /\.(png|zip)$/i.test(f.name))) void importMaskFiles(files);
+      else openFiles(files);
     };
     window.addEventListener('dragenter', enter);
     window.addEventListener('dragleave', leave);
@@ -57,10 +65,57 @@ export default function App() {
   const loading = useStore((s) => s.loading);
   const error = useStore((s) => s.error);
   const pickerOpen = useStore((s) => s.pickerOpen);
+  const modelNotice = useStore((s) => s.modelNotice);
+  const editor = useStore((s) => s.editor);
   const set = useStore((s) => s.set);
   const inputRef = useRef<HTMLInputElement>(null);
   const dragOver = useGlobalDrop();
   const pick = () => inputRef.current?.click();
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const s = useStore.getState();
+      if (e.key === 'Escape') {
+        if (s.editor) return; // the editor closes itself
+        if (s.tool !== 'pixel') s.set({ tool: 'pixel' });
+        else if (s.selected) s.set({ selected: null });
+        else if (s.activeRegion) s.set({ activeRegion: 0 });
+        return;
+      }
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
+      if (!s.cube || s.pickerOpen || s.modelNotice) return;
+      if (e.ctrlKey || e.metaKey) {
+        const key = e.key.toLowerCase();
+        if (key === 'z' || key === 'y') {
+          e.preventDefault();
+          if (key === 'y' || e.shiftKey) s.redo();
+          else s.undo();
+        }
+        return;
+      }
+      if (e.altKey) return;
+      const key = e.key.toLowerCase();
+      // Inside the editor only the brush keys work: the other tools act on a canvas that is covered up.
+      if (s.editor && !['a', 'd', '[', ']'].includes(key)) return;
+      if (key === 'p') s.setTool('point');
+      else if (key === 'b') s.setTool('box');
+      else if (key === 'v') s.setTool('select');
+      else if (key === 'a') {
+        s.set({ brushMode: 'add' });
+        s.setTool('brush');
+      } else if (key === 'd') {
+        s.set({ brushMode: 'erase' });
+        s.setTool('brush');
+      } else if (key === '[') s.set({ brushSize: Math.max(1, s.brushSize - 2) });
+      else if (key === ']') s.set({ brushSize: Math.min(60, s.brushSize + 2) });
+      else if (e.key === 'Backspace' && s.tool === 'point') {
+        e.preventDefault();
+        void s.removeLastPoint();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   return (
     <div className="app">
@@ -106,8 +161,14 @@ export default function App() {
 
       {cube ? (
         <main className="workspace" key={cubeId}>
-          <ImageCanvas />
-          <SpectrumPlot />
+          <div className="image-side">
+            <Toolbar />
+            <ImageCanvas />
+          </div>
+          <div className="data-side">
+            <SpectrumPlot />
+            <RegionsPanel />
+          </div>
         </main>
       ) : (
         <main className="empty">
@@ -132,7 +193,9 @@ export default function App() {
         </main>
       )}
 
+      {editor && <ObjectEditor />}
       {pickerOpen && <DatasetPicker />}
+      {modelNotice && <ModelNotice />}
       {dragOver && <div className="drop-overlay">Drop to open</div>}
       {loading && (
         <div className="loading" role="status">

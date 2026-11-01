@@ -16,8 +16,15 @@ export function rgbBands(cube: HyperCube): [number, number, number] {
   return [Math.round(B * 0.75), Math.round(B * 0.5), Math.round(B * 0.25)];
 }
 
-/** Render the RGB composite (2–98% percentile stretch per channel) into a native-resolution canvas. */
+const rendered = new WeakMap<HyperCube, HTMLCanvasElement>();
+
+/**
+ * The RGB composite (2–98% percentile stretch per channel) as a native-resolution canvas.
+ * Kept per cube: the main view and the editor share one picture.
+ */
 export function renderRgbImage(cube: HyperCube): HTMLCanvasElement {
+  const existing = rendered.get(cube);
+  if (existing) return existing;
   const { width, height } = cube;
   const canvas = document.createElement('canvas');
   canvas.width = width;
@@ -33,5 +40,6 @@ export function renderRgbImage(cube: HyperCube): HTMLCanvasElement {
   renderRGB(channels, width * height, cube.noDataValue, img.data);
 
   ctx.putImageData(img, 0, 0);
+  rendered.set(cube, canvas);
   return canvas;
 }

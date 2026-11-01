@@ -1,7 +1,8 @@
 import * as Comlink from 'comlink';
 import type { LoaderApi } from '../worker/loader.worker';
 import type { Axes } from '../types';
-import { useStore } from '../store';
+import { decodeMaskPng, nameFromMaskFile, pngsInZip } from '../lib/maskFile';
+import { useStore, type IncomingMask } from '../store';
 
 let api: Comlink.Remote<LoaderApi> | null = null;
 
@@ -38,6 +39,54 @@ export async function loadCandidate(id: string, axes: Axes | null) {
   } catch (e) {
     set({ loading: null, error: message(e) });
   }
+}
+
+/** Read mask PNGs, or zips of them, into the current image. A bad file doesn't stop the good ones. */
+export async function importMaskFiles(files: File[]) {
+  const { cube, cubeId, fingerprint, set, addMasks, notify } = useStore.getState();
+  if (!cube) return;
+  const problems: string[] = [];
+  const entries: { name: string; bytes: Uint8Array }[] = [];
+  for (const file of files) {
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      if (/\.zip$/i.test(file.name)) {
+        const pngs = pngsInZip(bytes);
+        if (!pngs.length) problems.push(`${file.name}: no PNG masks inside`);
+        entries.push(...pngs);
+      } else entries.push({ name: file.name, bytes });
+    } catch (e) {
+      problems.push(`${file.name}: ${message(e)}`);
+    }
+  }
+  if (useStore.getState().cubeId !== cubeId) return;
+
+  const decoded: IncomingMask[] = [];
+  for (const { name, bytes } of entries) {
+    try {
+      const d = decodeMaskPng(bytes, cube.width, cube.height);
+      if (!d.pixels) problems.push(`${name}: the mask is empty`);
+      else decoded.push({ ...d, name: d.meta?.name || nameFromMaskFile(name, cube.name) });
+    } catch (e) {
+      problems.push(`${name}: ${message(e)}`);
+    }
+  }
+
+  // Captures often share a size, so a mask from another one would fit and silently measure the wrong pixels.
+  const foreign = decoded.filter((d) => d.meta?.fingerprint && d.meta.fingerprint !== fingerprint);
+  let accepted = decoded;
+  if (foreign.length && !window.confirm(`${foreign.length} of these masks came from a different image ("${foreign[0].meta!.image}"), so the areas may not match. Import them anyway?`)) {
+    accepted = decoded.filter((d) => !foreign.includes(d));
+  }
+
+  const { added, updated, skipped } = addMasks(accepted);
+  const done = [added && `Imported ${added} mask${added === 1 ? '' : 's'}`, updated && `Updated ${updated} highlight${updated === 1 ? '' : 's'}`].filter(Boolean).join(', ');
+  if (done) notify(`${done}. Ctrl+Z undoes this.`);
+  const warnings = [
+    ...skipped.map((s) => `${s.name}: ${s.pixels.toLocaleString()} pixels already belong to another highlight and were left out`),
+    ...problems,
+  ];
+  if (warnings.length) set({ error: `Mask import: ${warnings.join(' · ')}` });
 }
 
 /** A real Specim IQ capture of a vine row, bundled from public/demo (~65 MB in two gzipped halves). */
