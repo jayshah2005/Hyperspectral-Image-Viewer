@@ -1,5 +1,4 @@
 import type { HyperCube } from '../types';
-import { isValid } from './cube';
 
 export interface RegionStats {
   /** Pixels in the region. */
@@ -9,21 +8,51 @@ export interface RegionStats {
   std: Float64Array;
   /** Valid pixels per band. */
   n: Uint32Array;
+  /** The pixels these figures describe. */
+  pixels?: Int32Array;
+}
+
+function samePixels(a: Int32Array, b: Int32Array | undefined): boolean {
+  if (!b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 /** Per-band statistics of each region. Bad bands and no-data are left out, so those means are NaN. */
-export function regionStats(cube: HyperCube, labels: Uint16Array, ids: number[]): Map<number, RegionStats> {
+export function regionStats(cube: HyperCube, labels: Uint16Array, ids: number[], previous?: Map<number, RegionStats>): Map<number, RegionStats> {
   const { bands, data, badBands, noDataValue } = cube;
   const pixels = cube.width * cube.height;
-  const members = new Map<number, number[]>(ids.map((id) => [id, []]));
-  for (let p = 0; p < pixels; p++) if (labels[p]) members.get(labels[p])?.push(p);
+  const sizes = new Map<number, number>(ids.map((id) => [id, 0]));
+  for (let p = 0; p < pixels; p++) {
+    const size = sizes.get(labels[p]);
+    if (labels[p] && size !== undefined) sizes.set(labels[p], size + 1);
+  }
+  const members = new Map<number, Int32Array>();
+  const filled = new Map<number, number>();
+  for (const [id, size] of sizes) {
+    members.set(id, new Int32Array(size));
+    filled.set(id, 0);
+  }
+  for (let p = 0; p < pixels; p++) {
+    const list = labels[p] ? members.get(labels[p]) : undefined;
+    if (!list) continue;
+    const at = filled.get(labels[p])!;
+    list[at] = p;
+    filled.set(labels[p], at + 1);
+  }
 
   const out = new Map<number, RegionStats>();
   for (const [id, list] of members) {
+    // An edit usually changes one region. Comparing pixels is far cheaper than recalculating 200 bands.
+    const before = previous?.get(id);
+    if (before && samePixels(list, before.pixels)) {
+      out.set(id, before);
+      continue;
+    }
     const mean = new Float64Array(bands);
     const std = new Float64Array(bands);
     const n = new Uint32Array(bands);
-    // The cube is stored band by band, so walking one band at a time stays in cache.
+    // The cube is stored band by band, so walking one band at a time stays in cache. This runs after every edit.
     for (let b = 0; b < bands; b++) {
       if (badBands?.[b]) {
         mean[b] = std[b] = NaN;
@@ -33,9 +62,9 @@ export function regionStats(cube: HyperCube, labels: Uint16Array, ids: number[])
       let count = 0;
       let m = 0;
       let s2 = 0;
-      for (const p of list) {
-        const v = data[base + p];
-        if (!isValid(v, noDataValue)) continue;
+      for (let i = 0; i < list.length; i++) {
+        const v = data[base + list[i]];
+        if (v - v !== 0 || v === noDataValue) continue; // the same test as isValid, inlined: NaN and infinities fail it
         count++;
         const d = v - m;
         m += d / count;
@@ -45,7 +74,7 @@ export function regionStats(cube: HyperCube, labels: Uint16Array, ids: number[])
       mean[b] = count ? m : NaN;
       std[b] = count > 1 ? Math.sqrt(s2 / (count - 1)) : NaN;
     }
-    out.set(id, { count: list.length, mean, std, n });
+    out.set(id, { count: list.length, mean, std, n, pixels: list });
   }
   return out;
 }
@@ -255,22 +284,97 @@ export function cleanMask(mask: Uint8Array, width: number, height: number): Uint
   return closeMask(blob, width, height);
 }
 
-/**
- * Shave one pixel off a region's edge: a pixel stays only if its four neighbours are in the region
- * (the Segmentation app's radius-1 disk; past the image edge counts as outside).
- */
-export function erodeLabel(labels: Uint16Array, id: number, width: number, height: number): number {
-  const remove: number[] = [];
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const i = y * width + x;
-      if (labels[i] !== id) continue;
-      const inner = x > 0 && y > 0 && x < width - 1 && y < height - 1 && labels[i - 1] === id && labels[i + 1] === id && labels[i - width] === id && labels[i + width] === id;
-      if (!inner) remove.push(i);
+/** Distances that make trimming instant: squared distance from each region pixel to the nearest pixel outside it. */
+export interface TrimField {
+  x0: number;
+  y0: number;
+  w: number;
+  h: number;
+  /** 0 outside the region. */
+  d2: Uint32Array;
+  /** The most that can be trimmed without removing the whole region. */
+  maxTrim: number;
+}
+
+/** One pass of the Felzenszwalb distance transform, over `n` cells of `grid` starting at `start`. */
+function distancePass(grid: Float64Array, start: number, stride: number, n: number, f: Float64Array, v: Int32Array, z: Float64Array): void {
+  for (let i = 0; i < n; i++) f[i] = grid[start + i * stride];
+  let k = 0;
+  v[0] = 0;
+  z[0] = -Infinity;
+  z[1] = Infinity;
+  for (let q = 1; q < n; q++) {
+    let s = (f[q] + q * q - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
+    while (s <= z[k]) {
+      k--;
+      s = (f[q] + q * q - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
+    }
+    k++;
+    v[k] = q;
+    z[k] = s;
+    z[k + 1] = Infinity;
+  }
+  k = 0;
+  for (let q = 0; q < n; q++) {
+    while (z[k + 1] < q) k++;
+    grid[start + q * stride] = (q - v[k]) * (q - v[k]) + f[v[k]];
+  }
+}
+
+export function trimField(labels: Uint16Array, id: number, width: number): TrimField | null {
+  const b = labelBounds(labels, id, width);
+  if (!b) return null;
+  const w = b.x1 - b.x0;
+  const h = b.y1 - b.y0;
+  // A one-pixel ring of "outside" around the box: the image edge counts as outside too.
+  const W = w + 2;
+  const H = h + 2;
+  const grid = new Float64Array(W * H);
+  const far = (W + H) * (W + H);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) if (labels[(b.y0 + y) * width + b.x0 + x] === id) grid[(y + 1) * W + x + 1] = far;
+  }
+  const n = Math.max(W, H);
+  const f = new Float64Array(n);
+  const v = new Int32Array(n);
+  const z = new Float64Array(n + 1);
+  for (let x = 0; x < W; x++) distancePass(grid, x, W, H, f, v, z);
+  for (let y = 0; y < H; y++) distancePass(grid, y * W, 1, W, f, v, z);
+  const d2 = new Uint32Array(w * h);
+  let max = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const d = grid[(y + 1) * W + x + 1];
+      d2[y * w + x] = d;
+      if (d > max) max = d;
     }
   }
-  for (const i of remove) labels[i] = 0;
-  return remove.length;
+  return { x0: b.x0, y0: b.y0, w, h, d2, maxTrim: Math.ceil(Math.sqrt(max)) - 1 };
+}
+
+/**
+ * Pull the edge in by `radius` pixels: a pixel stays if a disk of that radius around it holds nothing outside the
+ * region. The same rule as the Segmentation app's Trim edge. Always measured from the field's original outline.
+ */
+export function applyTrim(labels: Uint16Array, id: number, width: number, field: TrimField, radius: number): void {
+  const r2 = radius * radius;
+  for (let y = 0; y < field.h; y++) {
+    for (let x = 0; x < field.w; x++) {
+      const d = field.d2[y * field.w + x];
+      if (d) labels[(field.y0 + y) * width + field.x0 + x] = d > r2 ? id : 0;
+    }
+  }
+}
+
+/** A square around a region with room to work, moved as needed to stay inside the image. */
+export function squareCrop(b: { x0: number; y0: number; x1: number; y1: number }, width: number, height: number) {
+  const size = Math.max(b.x1 - b.x0, b.y1 - b.y0);
+  const margin = Math.min(48, Math.max(16, Math.round(size * 0.25)));
+  const w = Math.min(width, size + 2 * margin);
+  const h = Math.min(height, size + 2 * margin);
+  const x0 = Math.max(0, Math.min(width - w, Math.round((b.x0 + b.x1 - w) / 2)));
+  const y0 = Math.max(0, Math.min(height - h, Math.round((b.y0 + b.y1 - h) / 2)));
+  return { x0, y0, w, h };
 }
 
 export type BrushMode = 'add' | 'erase';
@@ -278,6 +382,14 @@ export type BrushMode = 'add' | 'erase';
 /** Brush size slider value → radius in image pixels. */
 export function brushRadius(diameterPx: number): number {
   return Math.max(0.5, diameterPx * 0.5);
+}
+
+/** Keeps a brush stroke inside the part of the image being edited. `x1` and `y1` are exclusive. */
+export interface Clip {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
 }
 
 /** Stamp a hard disk. Adding never overwrites another region. */
@@ -290,23 +402,27 @@ export function stampCircle(
   diameterPx: number,
   id: number,
   mode: BrushMode,
+  clip?: Clip,
 ): boolean {
   const radius = brushRadius(diameterPx);
   const rEff = Math.max(0.25, radius - 0.5);
   const r2 = rEff * rEff;
-  const x0 = Math.max(0, Math.floor(cx - radius));
-  const x1 = Math.min(width - 1, Math.ceil(cx + radius));
-  const y0 = Math.max(0, Math.floor(cy - radius));
-  const y1 = Math.min(height - 1, Math.ceil(cy + radius));
+  const x0 = Math.max(clip?.x0 ?? 0, Math.floor(cx - radius));
+  const x1 = Math.min((clip?.x1 ?? width) - 1, Math.ceil(cx + radius));
+  const y0 = Math.max(clip?.y0 ?? 0, Math.floor(cy - radius));
+  const y1 = Math.min((clip?.y1 ?? height) - 1, Math.ceil(cy + radius));
+  // The disk alone can miss every pixel centre with a thin brush, so a stroke would paint nothing.
+  const pointerX = Math.floor(cx);
+  const pointerY = Math.floor(cy);
   let changed = false;
   for (let y = y0; y <= y1; y++) {
     const dy = y + 0.5 - cy;
     const dy2 = dy * dy;
-    if (dy2 > r2) continue;
+    if (dy2 > r2 && y !== pointerY) continue;
     const row = y * width;
     for (let x = x0; x <= x1; x++) {
       const dx = x + 0.5 - cx;
-      if (dx * dx + dy2 > r2) continue;
+      if (dx * dx + dy2 > r2 && (x !== pointerX || y !== pointerY)) continue;
       const i = row + x;
       if (mode === 'erase') {
         if (labels[i] === id) {
@@ -333,6 +449,7 @@ export function stampLine(
   diameterPx: number,
   id: number,
   mode: BrushMode,
+  clip?: Clip,
 ): boolean {
   const dist = Math.hypot(x1 - x0, y1 - y0);
   const step = Math.max(0.35, brushRadius(diameterPx) * 0.2);
@@ -340,7 +457,7 @@ export function stampLine(
   let changed = false;
   for (let i = 0; i <= n; i++) {
     const t = i / n;
-    if (stampCircle(labels, width, height, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, diameterPx, id, mode)) changed = true;
+    if (stampCircle(labels, width, height, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, diameterPx, id, mode, clip)) changed = true;
   }
   return changed;
 }

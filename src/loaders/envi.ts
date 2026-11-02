@@ -115,7 +115,12 @@ export function parseEnvi(headerText: string, data: ArrayBuffer, name: string): 
   const bsq = toBSQ({ data: raw, shape, order: 'C' }, axes);
   const k = h.reflectanceScale;
   // Scaled integers (e.g. reflectance x 10000) become float reflectance, as the header defines.
-  if (k) bsq.data = Float32Array.from(bsq.data, (v) => v / k);
+  if (k) {
+    const source = bsq.data;
+    const scaled = new Float32Array(source.length);
+    for (let i = 0; i < source.length; i++) scaled[i] = source[i] / k;
+    bsq.data = scaled;
+  }
   return {
     name,
     ...bsq,

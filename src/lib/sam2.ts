@@ -1,6 +1,6 @@
 import * as Comlink from 'comlink';
 import type { Sam2Api } from '../worker/sam2.worker';
-import type { SamBackend, SamModelKey, SamPrompt } from './samModels';
+import { hasWebgpu, samFilePaths, type SamBackend, type SamModelKey, type SamPrompt } from './samModels';
 
 let api: Comlink.Remote<Sam2Api> | null = null;
 let encodedKey = '';
@@ -46,14 +46,19 @@ function enqueue<T>(job: () => Promise<T>): Promise<T> {
   return run;
 }
 
-/** Load the model if needed and encode this image. `key` identifies the image; it encodes only once per key. */
+/**
+ * Load the model if needed and encode this image. `key` identifies the image; it encodes only once per key.
+ * `wanted` is asked when its turn comes, so paging through images doesn't leave a queue of them to encode.
+ */
 export function encodeSam2Image(
   canvas: HTMLCanvasElement,
   model: SamModelKey,
   key: string,
+  wanted: () => boolean,
   onProgress?: (message: string) => void,
 ): Promise<SamBackend> {
   return enqueue(async () => {
+    if (!wanted()) throw new Error('That image is no longer open.');
     const progress = onProgress ? Comlink.proxy(onProgress) : undefined;
     const backend = await worker().load(model, progress);
     const full = `${model}:${key}`;
@@ -65,6 +70,19 @@ export function encodeSam2Image(
     }
     return backend;
   });
+}
+
+/** Whether this model is fully downloaded for this computer, so preparing in the background can't start a large download. */
+export async function samFilesCached(model: SamModelKey): Promise<boolean> {
+  try {
+    if (!(await caches.has('transformers-cache'))) return false;
+    const cache = await caches.open('transformers-cache');
+    const stored = (await cache.keys()).map((request) => request.url);
+    const needed = samFilePaths(model, (await hasWebgpu()) ? 'webgpu' : 'wasm');
+    return needed.every((path) => stored.some((url) => url.endsWith(path)));
+  } catch {
+    return false;
+  }
 }
 
 export function predictSam2(prompt: SamPrompt): Promise<Uint8Array> {

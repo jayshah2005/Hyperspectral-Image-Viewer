@@ -2,7 +2,7 @@ import * as Comlink from 'comlink';
 import ortMjs from '../../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.asyncify.mjs?url';
 import ortWasm from '../../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.asyncify.wasm?url';
 import { cleanMask, pickBestMask } from '../lib/mask';
-import { SAM_MODELS, type SamBackend, type SamModelKey, type SamPrompt } from '../lib/samModels';
+import { hasWebgpu, SAM_DTYPE, SAM_MODELS, samThreads, type SamBackend, type SamModelKey, type SamPrompt } from '../lib/samModels';
 
 type Progress = (message: string) => void;
 
@@ -31,27 +31,13 @@ async function transformers(): Promise<Tf> {
     // Use the runtime shipped with the site, not its default copy on a third-party CDN. The library
     // picks another build for old Safari without WebGPU; leave that one alone, since it isn't shipped.
     const wasm = tf.env.backends.onnx.wasm;
+    if (self.crossOriginIsolated) wasm.numThreads = samThreads(navigator.hardwareConcurrency || 1);
     if (String(wasm.wasmPaths?.mjs).endsWith('.asyncify.mjs')) {
       wasm.wasmPaths = { mjs: new URL(ortMjs, import.meta.url).href, wasm: new URL(ortWasm, import.meta.url).href };
     }
   }
   return tf;
 }
-
-async function hasWebgpu(): Promise<boolean> {
-  try {
-    const gpu = (navigator as Navigator & { gpu?: { requestAdapter: () => Promise<unknown> } }).gpu;
-    return Boolean(gpu && (await gpu.requestAdapter()));
-  } catch {
-    return false;
-  }
-}
-
-/** Full precision needs no optional GPU features (16-bit floats often are unavailable); 8-bit suits the processor. */
-const CONFIG: Record<SamBackend, { device: SamBackend; dtype: string }> = {
-  webgpu: { device: 'webgpu', dtype: 'fp32' },
-  wasm: { device: 'wasm', dtype: 'uint8' },
-};
 
 const api = {
   /** Check for a GPU before downloading anything, then fall back to the processor if its session fails. */
@@ -71,7 +57,8 @@ const api = {
       try {
         model = await Sam2Model.from_pretrained(id, {
           revision,
-          ...CONFIG[b],
+          device: b,
+          dtype: SAM_DTYPE[b],
           progress_callback: (info: { status?: string; progress?: number }) => {
             if (info.status === 'progress_total' && typeof info.progress === 'number') {
               onProgress?.(`Loading SAM 2 ${label} (${size} MB, once only)… ${Math.round(info.progress)}%`);

@@ -6,7 +6,10 @@ import { saveRegionMask } from './saveRegionMask';
 
 const ZOOM_STEP = 1.25;
 
-/** A close-up of one highlight with everything else dimmed, like Fine-tune in the Segmentation app. */
+/** Sliders give the keyboard back as soon as they're let go, or A, D and Ctrl+Z would stop working. */
+const release = (e: React.PointerEvent<HTMLInputElement>) => e.currentTarget.blur();
+
+/** A square crop around one highlight, with everything else dimmed. Modelled on Fine-tune in the Segmentation app. */
 export function ObjectEditor() {
   const editor = useStore((s) => s.editor)!;
   const region = useStore((s) => s.regions.find((r) => r.id === editor.id));
@@ -14,14 +17,16 @@ export function ObjectEditor() {
   const statsRev = useStore((s) => s.statsRev);
   const brushMode = useStore((s) => s.brushMode);
   const brushSize = useStore((s) => s.brushSize);
+  const trimValue = useStore((s) => s.trimValue);
   const canUndo = useStore((s) => s.canUndo);
   const canRedo = useStore((s) => s.canRedo);
   const samBusy = useStore((s) => s.samBusy);
   const error = useStore((s) => s.error);
-  const { set, closeEditor, undo, redo, renameRegion, shrinkRegion, resetOutline } = useStore.getState();
+  const { set, closeEditor, undo, redo, renameRegion, trimRegion, resetOutline } = useStore.getState();
   const viewport = useRef<Viewport | null>(null);
   const [zoom, setZoom] = useState(1);
   const pixels = useMemo(() => (labels ? countLabel(labels, editor.id) : 0), [labels, editor.id, statsRev]); // eslint-disable-line react-hooks/exhaustive-deps
+  const { x0, y0, w, h } = editor.rect;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -45,10 +50,14 @@ export function ObjectEditor() {
 
   return (
     <div className="editor" role="dialog" aria-modal="true" aria-label={`Fine-tune ${region.name}`}>
-      <header className="editor-bar">
-        <div className="editor-title">
-          <h2>Fine-tune</h2>
+      <div className="editor-panel">
+        <header className="editor-head">
+          <div className="editor-title">
+            <h2>Fine-tune</h2>
+            <p>Paint with the brush to add or erase. Scroll to zoom, hold Space and drag to move. Esc closes.</p>
+          </div>
           <input
+            className="editor-name"
             type="text"
             value={region.name}
             aria-label="Highlight name"
@@ -57,64 +66,74 @@ export function ObjectEditor() {
               if (e.key === 'Enter') e.currentTarget.blur();
             }}
           />
-          <span className="editor-stat" data-editor-pixels>
+          <span className="editor-pill" data-editor-pixels>
             {pixels.toLocaleString()} px
           </span>
-        </div>
-        <span className="editor-stat">{Math.round(zoom * 100)}%</span>
-        <button onClick={() => viewport.current?.zoomBy(ZOOM_STEP)}>Zoom +</button>
-        <button onClick={() => viewport.current?.zoomBy(1 / ZOOM_STEP)}>Zoom −</button>
-        <button onClick={() => viewport.current?.reset()}>Reset view</button>
-        <button className="primary" onClick={closeEditor}>
-          Done
-        </button>
-      </header>
+          <span className="editor-pill" data-editor-zoom>
+            {Math.round(zoom * 100)}%
+          </span>
+          <button onClick={() => viewport.current?.zoomBy(ZOOM_STEP)}>Zoom +</button>
+          <button onClick={() => viewport.current?.zoomBy(1 / ZOOM_STEP)}>Zoom −</button>
+          <button onClick={() => viewport.current?.reset()}>Reset view</button>
+          <button className="primary" onClick={closeEditor}>
+            Done
+          </button>
+        </header>
 
-      {error && (
-        <div className="banner error" role="alert">
-          <span>{error}</span>
-          <button className="icon" onClick={() => set({ error: null })} aria-label="Dismiss">
-            ×
-          </button>
+        <div>
+          {error && (
+            <div className="banner error" role="alert">
+              <span>{error}</span>
+              <button className="icon" onClick={() => set({ error: null })} aria-label="Dismiss">
+                ×
+              </button>
+            </div>
+          )}
         </div>
-      )}
 
-      <ImageCanvas focus={editor} viewport={viewport} onZoom={setZoom} />
+        {/* A new frame, after resetting the outline, starts a fresh view of it. */}
+        <ImageCanvas key={`${x0},${y0},${w},${h}`} focus={editor} viewport={viewport} onZoom={setZoom} />
 
-      <footer className="editor-bar bottom">
-        <div className="tool-group" role="group" aria-label="Brush mode">
-          <button className={brushMode === 'add' ? 'primary' : undefined} aria-pressed={brushMode === 'add'} onClick={() => set({ brushMode: 'add' })}>
-            Add (A)
+        <footer className="editor-foot">
+          <div className="mode-toggle" role="group" aria-label="Brush mode">
+            <button aria-pressed={brushMode === 'add'} onClick={() => set({ brushMode: 'add' })}>
+              Add (A)
+            </button>
+            <button aria-pressed={brushMode === 'erase'} onClick={() => set({ brushMode: 'erase' })}>
+              Erase (D)
+            </button>
+          </div>
+          <label className="slider-field" title="[ and ] change it too">
+            <span>
+              Brush size <strong>{brushSize}</strong> px
+            </span>
+            <input type="range" min={1} max={60} value={brushSize} onChange={(e) => set({ brushSize: Number(e.target.value) })} onPointerUp={release} />
+          </label>
+          <div className="tool-group">
+            <button disabled={!canUndo} onClick={undo} title="Undo (Ctrl+Z)">
+              Undo
+            </button>
+            <button disabled={!canRedo} onClick={redo} title="Redo (Ctrl+Shift+Z)">
+              Redo
+            </button>
+            {(region.points.length > 0 || region.box) && (
+              <button disabled={samBusy > 0} onClick={() => void resetOutline(region.id)} title="Discard the edits and outline it again from your clicks">
+                Reset to automatic outline
+              </button>
+            )}
+          </div>
+          <label className="slider-field" title="Shave the edge, to remove a thin halo of background. Counts from the outline as it was after your last brush stroke.">
+            <span>
+              Trim edge <strong>{trimValue}</strong> px
+            </span>
+            <input type="range" min={0} max={50} value={trimValue} disabled={samBusy > 0} onChange={(e) => trimRegion(region.id, Number(e.target.value))} onPointerUp={release} />
+          </label>
+          <span className="spacer" />
+          <button onClick={() => saveRegionMask(region)} title="Download this highlight's mask as a black-and-white PNG">
+            Save mask
           </button>
-          <button className={brushMode === 'erase' ? 'primary' : undefined} aria-pressed={brushMode === 'erase'} onClick={() => set({ brushMode: 'erase' })}>
-            Erase (D)
-          </button>
-        </div>
-        <label className="brush-size" title="Brush size ([ and ])">
-          <span>{brushSize} px</span>
-          <input type="range" min={1} max={60} value={brushSize} onChange={(e) => set({ brushSize: Number(e.target.value) })} />
-        </label>
-        <div className="tool-group">
-          <button disabled={!canUndo} onClick={undo} title="Undo (Ctrl+Z)">
-            Undo
-          </button>
-          <button disabled={!canRedo} onClick={redo} title="Redo (Ctrl+Shift+Z)">
-            Redo
-          </button>
-        </div>
-        <button disabled={samBusy > 0} onClick={() => shrinkRegion(region.id)} title="Shave 1 pixel off the edge, to remove a background fringe">
-          Shrink 1 px
-        </button>
-        {(region.points.length > 0 || region.box) && (
-          <button disabled={samBusy > 0} onClick={() => void resetOutline(region.id)} title="Discard the edits and outline it again from your clicks">
-            Reset to automatic outline
-          </button>
-        )}
-        <span className="spacer" />
-        <button onClick={() => saveRegionMask(region)} title="Download this highlight's mask as a black-and-white PNG">
-          Save mask
-        </button>
-      </footer>
+        </footer>
+      </div>
     </div>
   );
 }

@@ -43,3 +43,27 @@ export function renderRgbImage(cube: HyperCube): HTMLCanvasElement {
   rendered.set(cube, canvas);
   return canvas;
 }
+
+/**
+ * RGBA pixels of a part of the image, stretched to that part's own brightness range. A single bright object such as
+ * a white reference sets the exposure of the whole picture, which leaves the leaves too dark to edit. All three
+ * channels share one range, so colours stay true. This only affects what is displayed.
+ */
+export function renderCropPicture(cube: HyperCube, rect: { x0: number; y0: number; w: number; h: number }): Uint8ClampedArray {
+  const { x0, y0, w, h } = rect;
+  const pixels = w * h;
+  // One channel after another, so that sampling the list sees all three evenly.
+  const values = new Float64Array(pixels * 3);
+  rgbBands(cube).forEach((band, c) => {
+    const source = getBand(cube, band);
+    for (let y = 0, o = c * pixels; y < h; y++) {
+      const row = (y0 + y) * cube.width + x0;
+      for (let x = 0; x < w; x++) values[o++] = source[row + x];
+    }
+  });
+  const [lo, hi] = stretchRange(sortedSample(values, cube.noDataValue), 0.5, 99.8);
+  const channel = (c: number): Channel => ({ values: values.subarray(c * pixels, (c + 1) * pixels), lo, hi });
+  const out = new Uint8ClampedArray(pixels * 4);
+  renderRGB([channel(0), channel(1), channel(2)], pixels, cube.noDataValue, out);
+  return out;
+}

@@ -29,7 +29,36 @@ export const SAM_MODELS: Record<SamModelKey, SamModel> = {
 
 export const DEFAULT_SAM_MODEL: SamModelKey = 'base-plus';
 
+/**
+ * Threads for SAM on the processor. Preparing an image took 10.1 s on 1 thread, 2.6 s on 4 and 1.4 s on 12 (14-core
+ * machine). Two cores stay free so the page stays smooth.
+ */
+export function samThreads(cores: number): number {
+  return Math.max(1, Math.min(12, cores - 2));
+}
+
 export type SamBackend = 'webgpu' | 'wasm';
+
+/** Full precision needs no optional GPU features (16-bit floats often are unavailable); 8-bit suits the processor. */
+export const SAM_DTYPE: Record<SamBackend, string> = { webgpu: 'fp32', wasm: 'uint8' };
+
+/** The ONNX files a model needs on a backend, as stored on Hugging Face. Full precision has no suffix in its name. */
+export function samFilePaths(key: SamModelKey, backend: SamBackend): string[] {
+  const { id, revision } = SAM_MODELS[key];
+  const suffix = backend === 'webgpu' ? '' : `_${SAM_DTYPE[backend]}`;
+  return ['vision_encoder', 'prompt_encoder_mask_decoder'].flatMap((part) =>
+    ['.onnx', '.onnx_data'].map((ext) => `${id}/resolve/${revision}/onnx/${part}${suffix}${ext}`),
+  );
+}
+
+export async function hasWebgpu(): Promise<boolean> {
+  try {
+    const gpu = (navigator as Navigator & { gpu?: { requestAdapter: () => Promise<unknown> } }).gpu;
+    return Boolean(gpu && (await gpu.requestAdapter()));
+  } catch {
+    return false;
+  }
+}
 
 /** One object's prompts. `label`: 1 = include, 0 = leave out. Box is [x0, y0, x1, y1] in image pixels. */
 export interface SamPrompt {

@@ -8,10 +8,14 @@ const W = 16;
 const H = 16;
 let predictCalls: SamPrompt[] = [];
 let failNext = false;
+let encodeGate: Promise<void> = Promise.resolve();
 vi.mock('./lib/sam2', () => ({
   getSam2Rgb: () => ({}),
   resetSam2Image: () => {},
-  encodeSam2Image: async () => 'wasm',
+  encodeSam2Image: async () => {
+    await encodeGate;
+    return 'wasm';
+  },
   predictSam2: async (prompt: SamPrompt) => {
     predictCalls.push(prompt);
     if (failNext) {
@@ -48,12 +52,40 @@ let store: ReturnType<typeof memory>;
 beforeEach(async () => {
   predictCalls = [];
   failNext = false;
+  encodeGate = Promise.resolve();
   await s().flushSave(); // finish the last test's pending write before swapping stores
   store = memory();
   setHighlightStore(store);
   vi.stubGlobal('localStorage', { getItem: () => '1', setItem: () => {} });
   s().setCube(makeCube());
   await vi.waitFor(() => expect(s().labels).not.toBeNull());
+});
+
+describe('while the model is preparing', () => {
+  const held = () => {
+    let release = () => {};
+    encodeGate = new Promise((r) => (release = r));
+    return release;
+  };
+
+  it('stops the spinner when another image opens', async () => {
+    const release = held();
+    const pending = s().prepareSam();
+    expect(s().loading).toMatch(/Preparing/);
+    s().setCube(makeCube(1));
+    release();
+    await pending;
+    expect(s().loading).toBeNull();
+  });
+
+  it('stops the spinner when the model is changed', async () => {
+    const release = held();
+    const pending = s().prepareSam();
+    s().chooseModel(s().samModel === 'tiny' ? 'base-plus' : 'tiny');
+    release();
+    await pending;
+    expect(s().loading).toBeNull();
+  });
 });
 
 describe('one click, one object', () => {
@@ -162,7 +194,9 @@ describe('editing', () => {
   it('shrinks, deletes one object, and undoes and redoes all of it', async () => {
     await s().highlightAt(3, 3);
     await s().highlightAt(10, 10);
-    s().shrinkRegion(1);
+    s().openEditor(1);
+    s().trimRegion(1, 1);
+    s().closeEditor();
     expect(count(1)).toBe(1);
     s().deleteRegion(2);
     expect(count(2)).toBe(0);
@@ -320,7 +354,7 @@ describe('saving', () => {
       s().set({ tool: 'select' });
       s().openEditor(s().activeRegion);
       expect(s().tool).toBe('brush');
-      expect(s().editor?.rect).toMatchObject({ x0: 0, y0: 0 });
+      expect(s().editor!.rect.w).toBe(s().editor!.rect.h);
       const rect = s().editor!.rect;
       s().set({ brushSize: 1 });
       paint(12, 12);
@@ -369,6 +403,79 @@ describe('saving', () => {
       expect(count(id)).toBe(before);
     });
 
+    it('keeps a stroke that is still going when Esc closes the editor, as one undo step', async () => {
+      await s().highlightAt(3, 3);
+      const id = s().activeRegion;
+      const before = count(id);
+      s().openEditor(id);
+      s().set({ brushSize: 3, brushMode: 'add' });
+      s().beginStroke();
+      s().paintStroke(10, 10, 10, 10);
+      s().closeEditor();
+      expect(s().editor).toBeNull();
+      expect(s().regions.find((r) => r.id === id)!.edited).toBe(true);
+      expect(count(id)).toBeGreaterThan(before);
+      s().undo();
+      expect(count(id)).toBe(before);
+    });
+
+    it('ignores undo and redo in the middle of a stroke', async () => {
+      await s().highlightAt(3, 3);
+      const id = s().activeRegion;
+      const before = count(id);
+      s().set({ tool: 'brush', brushSize: 3, brushMode: 'add' });
+      s().beginStroke();
+      s().paintStroke(10, 10, 10, 10);
+      const painted = count(id);
+      s().undo();
+      expect(count(id)).toBe(painted);
+      s().redo();
+      expect(count(id)).toBe(painted);
+      s().endStroke();
+      s().undo();
+      expect(count(id)).toBe(before);
+    });
+
+    it('leaves no trace when Trim edge goes back to 0', async () => {
+      await s().highlightAt(3, 3);
+      const id = s().activeRegion;
+      const before = count(id);
+      s().openEditor(id);
+      s().trimRegion(id, 1);
+      expect(count(id)).toBeLessThan(before);
+      expect(s().canUndo).toBe(true);
+      s().trimRegion(id, 0);
+      expect(count(id)).toBe(before);
+      expect(s().trimValue).toBe(0);
+      expect(s().canUndo).toBe(false);
+      expect(s().canRedo).toBe(false);
+      expect(s().regions.find((r) => r.id === id)!.edited).toBe(false);
+      s().trimRegion(id, 1); // and it can be moved again
+      expect(count(id)).toBeLessThan(before);
+    });
+
+    it('keeps the same frame after a reset that lands on the same outline', async () => {
+      await s().highlightAt(3, 3);
+      const id = s().activeRegion;
+      s().openEditor(id);
+      const { rect } = s().editor!;
+      s().set({ brushSize: 1, brushMode: 'erase' });
+      paint(3, 3);
+      await s().resetOutline(id);
+      expect(s().editor!.rect).toBe(rect);
+    });
+
+    it('adds no undo step when a highlight is too thin to trim', async () => {
+      s().set({ activeRegion: 0 });
+      s().togglePixel(5, 5);
+      const id = s().activeRegion;
+      s().openEditor(id);
+      s().trimRegion(id, 5);
+      expect(s().canUndo).toBe(false);
+      expect(s().trimValue).toBe(0);
+      expect(count(id)).toBe(1);
+    });
+
     it('resets to the automatic outline', async () => {
       await s().highlightAt(3, 3);
       const id = s().activeRegion;
@@ -380,6 +487,62 @@ describe('saving', () => {
       await s().resetOutline(id);
       expect(count(id)).toBe(before);
       expect(s().regions[0].edited).toBe(false);
+    });
+
+    it('never changes anything outside the crop', async () => {
+      await s().highlightAt(3, 3);
+      const id = s().activeRegion;
+      s().openEditor(id);
+      const { x0, y0, w, h } = s().editor!.rect;
+      s().set({ brushSize: 60, brushMode: 'add' });
+      s().beginStroke();
+      s().paintStroke(x0 + w - 1, y0 + h - 1, x0 + w - 1, y0 + h - 1);
+      s().endStroke();
+      s().labels!.forEach((v, p) => {
+        if (v) {
+          const [x, y] = [p % W, Math.floor(p / W)];
+          expect(x >= x0 && x < x0 + w && y >= y0 && y < y0 + h).toBe(true);
+        }
+      });
+    });
+
+    it('trims live from one outline, in one undo step, and never removes the highlight', async () => {
+      await s().highlightAt(8, 8);
+      const id = s().activeRegion;
+      s().openEditor(id);
+      s().trimRegion(id, 1);
+      expect(count(id)).toBe(1); // the 3×3 square's centre
+      expect(s().trimValue).toBe(1);
+      s().trimRegion(id, 50);
+      expect(s().regions).toHaveLength(1);
+      expect(s().trimValue).toBe(1);
+      s().trimRegion(id, 0);
+      expect(count(id)).toBe(9); // sliding back restores it
+      s().trimRegion(id, 1);
+      s().undo();
+      expect(count(id)).toBe(9);
+      expect(s().trimValue).toBe(0);
+      expect(s().canUndo).toBe(false);
+    });
+
+    it('measures trim from the new outline after a brush stroke', async () => {
+      await s().highlightAt(8, 8);
+      const id = s().activeRegion;
+      s().openEditor(id);
+      s().trimRegion(id, 1);
+      s().set({ brushSize: 1, brushMode: 'add' });
+      paint(8.5, 7.5);
+      expect(s().trimValue).toBe(0);
+      expect(count(id)).toBe(2);
+    });
+
+    it('says so when a stroke runs into another highlight', async () => {
+      await s().highlightAt(3, 3);
+      await s().highlightAt(6, 3);
+      s().openEditor(s().regions[0].id);
+      s().set({ brushSize: 1, brushMode: 'add' });
+      paint(6, 3);
+      expect(s().notice).toMatch(/Another highlight/);
     });
 
     it('does not paint while an outline is still being computed', async () => {

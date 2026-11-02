@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useStore, type ClickMode, type EditorState } from '../store';
-import { renderRgbImage } from '../lib/display';
+import { renderCropPicture, renderRgbImage } from '../lib/display';
 import { setSam2Rgb } from '../lib/sam2';
 import { regionColor } from '../lib/colors';
 import { brushRadius } from '../lib/mask';
@@ -13,9 +13,11 @@ interface View {
 
 const ACTIVE_ALPHA = 150;
 const OTHER_ALPHA = 72;
-/** In the editor: how far everything but the highlight is darkened, and how strongly the highlight is tinted. */
-const DIM_ALPHA = 150;
-const FOCUS_TINT_ALPHA = 70;
+/** In the editor: how visible the surroundings stay, and how much further other highlights are darkened. */
+const SURROUND_ALPHA = 0.42;
+const OTHER_HIGHLIGHT_SHADE = 110;
+const EDITOR_BACKGROUND = '#07090c';
+const BACKGROUND_PREPARE_DELAY = 400;
 /** How close, in screen pixels, a click must be to a dot to remove it. */
 const DOT_HIT = 7;
 
@@ -33,13 +35,12 @@ export interface Viewport {
 }
 
 interface Props {
-  /** Editor mode: frame this highlight, dim everything else, and only paint. */
+  /** Editor mode: show only a crop around this highlight, with everything but the highlight dimmed, and only paint. */
   focus?: EditorState;
   viewport?: React.MutableRefObject<Viewport | null>;
+  /** Editor mode: the zoom, as a multiple of fitting the crop to the view. */
   onZoom?: (zoom: number) => void;
 }
-
-const EDITOR_HINT = 'Paint to correct · A add · D erase · [ ] size · scroll to zoom · Space-drag to pan';
 
 /** RGB view with the highlights on top. What a click does depends on the tool. */
 export function ImageCanvas({ focus, viewport, onZoom }: Props) {
@@ -47,13 +48,22 @@ export function ImageCanvas({ focus, viewport, onZoom }: Props) {
   const tool = useStore((s) => s.tool);
   const notice = useStore((s) => s.notice);
   const samBusy = useStore((s) => s.samBusy);
-  const image = useMemo(() => renderRgbImage(cube), [cube]);
+  const crop = focus?.rect;
+  const picture = useMemo(() => (crop ? renderCropPicture(cube, crop) : null), [cube, crop]);
+  const image = useMemo(() => {
+    if (!crop || !picture) return renderRgbImage(cube);
+    const c = document.createElement('canvas');
+    c.width = crop.w;
+    c.height = crop.h;
+    c.getContext('2d')!.putImageData(new ImageData(picture, crop.w, crop.h), 0, 0);
+    return c;
+  }, [cube, crop, picture]);
   const overlay = useMemo(() => {
     const c = document.createElement('canvas');
-    c.width = cube.width;
-    c.height = cube.height;
+    c.width = crop?.w ?? cube.width;
+    c.height = crop?.h ?? cube.height;
     return c;
-  }, [cube]);
+  }, [cube, crop]);
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -63,15 +73,22 @@ export function ImageCanvas({ focus, viewport, onZoom }: Props) {
   const boxEnd = useRef<{ sx: number; sy: number } | null>(null);
   const frame = useRef(0);
   const zoomShown = useRef(0);
+  const fitZoom = useRef(1);
   const space = useRef(false);
   const hoverPx = useRef<{ x: number; y: number } | null>(null);
   const [spaceHeld, setSpaceHeld] = useState(false);
+  const [outsideCrop, setOutsideCrop] = useState(false);
 
   useEffect(() => {
     // The main view owns this: the editor closing must not take the picture away from SAM.
     if (focus) return;
     setSam2Rgb(image);
-    return () => setSam2Rgb(null);
+    // Wait briefly, so paging quickly through images doesn't queue up work for each of them.
+    const prepare = setTimeout(() => void useStore.getState().prepareSamInBackground(), BACKGROUND_PREPARE_DELAY);
+    return () => {
+      clearTimeout(prepare);
+      setSam2Rgb(null);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [image]);
 
@@ -80,10 +97,14 @@ export function ImageCanvas({ focus, viewport, onZoom }: Props) {
     const { labels, activeRegion } = useStore.getState();
     if (!labels) return;
     const { width, height } = cube;
-    const x0 = rect ? Math.max(0, Math.floor(rect.x0)) : 0;
-    const y0 = rect ? Math.max(0, Math.floor(rect.y0)) : 0;
-    const x1 = rect ? Math.min(width, Math.ceil(rect.x1) + 1) : width;
-    const y1 = rect ? Math.min(height, Math.ceil(rect.y1) + 1) : height;
+    const left = crop?.x0 ?? 0;
+    const top = crop?.y0 ?? 0;
+    const right = crop ? crop.x0 + crop.w : width;
+    const bottom = crop ? crop.y0 + crop.h : height;
+    const x0 = rect ? Math.max(left, Math.floor(rect.x0)) : left;
+    const y0 = rect ? Math.max(top, Math.floor(rect.y0)) : top;
+    const x1 = rect ? Math.min(right, Math.ceil(rect.x1) + 1) : right;
+    const y1 = rect ? Math.min(bottom, Math.ceil(rect.y1) + 1) : bottom;
     if (x1 <= x0 || y1 <= y0) return;
     const ctx = overlay.getContext('2d')!;
     const img = ctx.createImageData(x1 - x0, y1 - y0);
@@ -93,24 +114,16 @@ export function ImageCanvas({ focus, viewport, onZoom }: Props) {
       for (let x = x0; x < x1; x++, o += 4) {
         const p = y * width + x;
         const id = labels[p];
-        if (focus) {
+        if (focus && crop && picture) {
           if (id === focus.id) {
-            const [r, g, b] = regionColor(id - 1);
-            // A solid edge shows exactly which pixels are in, however far you zoom.
-            const edge = x === 0 || y === 0 || x === width - 1 || y === height - 1 || labels[p - 1] !== id || labels[p + 1] !== id || labels[p - width] !== id || labels[p + width] !== id;
-            d[o] = r;
-            d[o + 1] = g;
-            d[o + 2] = b;
-            d[o + 3] = edge ? 255 : FOCUS_TINT_ALPHA;
+            // The highlight itself: its real colours at full brightness, with nothing drawn over it.
+            const q = ((y - top) * crop.w + x - left) * 4;
+            d[o] = picture[q];
+            d[o + 1] = picture[q + 1];
+            d[o + 2] = picture[q + 2];
+            d[o + 3] = 255;
           } else if (id) {
-            // Other highlights stay visible but faint: the brush can't paint over them.
-            const [r, g, b] = regionColor(id - 1);
-            d[o] = r >> 2;
-            d[o + 1] = g >> 2;
-            d[o + 2] = b >> 2;
-            d[o + 3] = DIM_ALPHA + 30;
-          } else {
-            d[o + 3] = DIM_ALPHA;
+            d[o + 3] = OTHER_HIGHLIGHT_SHADE; // darker than its surroundings: the brush can't paint over it
           }
           continue;
         }
@@ -122,7 +135,7 @@ export function ImageCanvas({ focus, viewport, onZoom }: Props) {
         d[o + 3] = id === activeRegion ? ACTIVE_ALPHA : OTHER_ALPHA;
       }
     }
-    ctx.putImageData(img, x0, y0);
+    ctx.putImageData(img, x0 - left, y0 - top);
   };
 
   const draw = () => {
@@ -134,8 +147,21 @@ export function ImageCanvas({ focus, viewport, onZoom }: Props) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.imageSmoothingEnabled = zoom < 1;
-    ctx.drawImage(image, ox, oy, cube.width * zoom, cube.height * zoom);
-    ctx.drawImage(overlay, ox, oy, cube.width * zoom, cube.height * zoom);
+    if (crop) {
+      const [dx, dy, dw, dh] = [ox + crop.x0 * zoom, oy + crop.y0 * zoom, crop.w * zoom, crop.h * zoom];
+      ctx.fillStyle = EDITOR_BACKGROUND;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.globalAlpha = SURROUND_ALPHA;
+      ctx.drawImage(image, dx, dy, dw, dh);
+      ctx.globalAlpha = 1;
+      ctx.drawImage(overlay, dx, dy, dw, dh);
+      ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(dx + 0.5, dy + 0.5, dw - 1, dh - 1);
+    } else {
+      ctx.drawImage(image, ox, oy, cube.width * zoom, cube.height * zoom);
+      ctx.drawImage(overlay, ox, oy, cube.width * zoom, cube.height * zoom);
+    }
 
     const st = useStore.getState();
     const sel = st.selected;
@@ -153,7 +179,7 @@ export function ImageCanvas({ focus, viewport, onZoom }: Props) {
       ctx.stroke();
     }
 
-    if (st.tool === 'point' || st.tool === 'box' || st.tool === 'select') {
+    if (!focus && (st.tool === 'point' || st.tool === 'box' || st.tool === 'select')) {
       for (const region of st.regions) {
         const active = region.id === st.activeRegion;
         if (region.box && active) {
@@ -211,7 +237,7 @@ export function ImageCanvas({ focus, viewport, onZoom }: Props) {
     view.current = v;
     if (v.zoom !== zoomShown.current) {
       zoomShown.current = v.zoom;
-      onZoom?.(v.zoom);
+      onZoom?.(v.zoom / fitZoom.current);
     }
     requestDraw();
   };
@@ -220,15 +246,18 @@ export function ImageCanvas({ focus, viewport, onZoom }: Props) {
     const wrap = wrapRef.current;
     if (!wrap) return;
     const { clientWidth: w, clientHeight: h } = wrap;
-    const r = focus?.rect ?? { x0: 0, y0: 0, w: cube.width, h: cube.height };
-    const zoom = Math.min(w / r.w, h / r.h) * 0.96;
+    const r = crop ?? { x0: 0, y0: 0, w: cube.width, h: cube.height };
+    const zoom = Math.min(w / r.w, h / r.h) * (crop ? 1 : 0.96);
+    fitZoom.current = zoom;
     setView({ zoom, ox: (w - r.w * zoom) / 2 - r.x0 * zoom, oy: (h - r.h * zoom) / 2 - r.y0 * zoom });
   };
 
   /** Zoom keeping the canvas point (cx, cy) fixed. */
   const zoomAround = (cx: number, cy: number, factor: number) => {
     const v = view.current;
-    const zoom = Math.min(64, Math.max(0.05, v.zoom * factor));
+    // In the editor the limits are relative to the crop, so it can't get lost.
+    const [least, most] = crop ? [fitZoom.current * 0.5, fitZoom.current * 32] : [0.05, 64];
+    const zoom = Math.min(most, Math.max(least, v.zoom * factor));
     const k = zoom / v.zoom;
     setView({ zoom, ox: cx - (cx - v.ox) * k, oy: cy - (cy - v.oy) * k });
   };
@@ -305,7 +334,7 @@ export function ImageCanvas({ focus, viewport, onZoom }: Props) {
     const { zoom, ox, oy } = view.current;
     const x = (sx - ox) / zoom;
     const y = (sy - oy) / zoom;
-    if (x < 0 || y < 0 || x >= cube.width || y >= cube.height) return null;
+    if (crop ? x < crop.x0 || y < crop.y0 || x >= crop.x0 + crop.w || y >= crop.y0 + crop.h : x < 0 || y < 0 || x >= cube.width || y >= cube.height) return null;
     return { x, y, ix: Math.floor(x), iy: Math.floor(y) };
   };
 
@@ -314,7 +343,10 @@ export function ImageCanvas({ focus, viewport, onZoom }: Props) {
     hoverPx.current = next;
     const { hovered, set, tool: t } = useStore.getState();
     if (t === 'brush') requestDraw();
-    if (focus) return; // the graph is covered up, so don't make it follow the mouse
+    if (focus) {
+      setOutsideCrop(next === null);
+      return; // the graph is covered up, so don't make it follow the mouse
+    }
     if (next?.x !== hovered?.x || next?.y !== hovered?.y) set({ hovered: next });
   };
 
@@ -343,6 +375,7 @@ export function ImageCanvas({ focus, viewport, onZoom }: Props) {
     if (!d?.painting && !d?.boxing) setHovered(p);
     else if (d.painting) {
       hoverPx.current = p ? { x: p.ix, y: p.iy } : null;
+      if (focus) setOutsideCrop(p === null);
       requestDraw();
     }
     if (!d) return;
@@ -355,10 +388,10 @@ export function ImageCanvas({ focus, viewport, onZoom }: Props) {
     } else if (d.boxing) {
       boxEnd.current = { sx, sy };
       requestDraw();
-    } else if (d.painting && p) {
-      const last = lastPaint.current ?? { x: p.x, y: p.y };
-      useStore.getState().paintStroke(last.x, last.y, p.x, p.y);
-      lastPaint.current = { x: p.x, y: p.y };
+    } else if (d.painting) {
+      // Off the picture the stroke is lifted: coming back elsewhere must not draw a line straight across.
+      if (p) useStore.getState().paintStroke(lastPaint.current?.x ?? p.x, lastPaint.current?.y ?? p.y, p.x, p.y);
+      lastPaint.current = p && { x: p.x, y: p.y };
     }
   };
 
@@ -420,7 +453,8 @@ export function ImageCanvas({ focus, viewport, onZoom }: Props) {
     }
   };
 
-  const cursor = tool === 'brush' && !spaceHeld ? 'none' : tool === 'point' || tool === 'box' ? (samBusy ? 'progress' : 'copy') : tool === 'select' ? 'pointer' : 'crosshair';
+  // The brush circle replaces the mouse pointer, which must come back outside the editor's crop.
+  const cursor = tool === 'brush' && !spaceHeld ? (outsideCrop ? 'default' : 'none') : tool === 'point' || tool === 'box' ? (samBusy ? 'progress' : 'copy') : tool === 'select' ? 'pointer' : 'crosshair';
 
   return (
     <div className="canvas-wrap" ref={wrapRef} aria-busy={samBusy > 0}>
@@ -434,7 +468,7 @@ export function ImageCanvas({ focus, viewport, onZoom }: Props) {
         onDoubleClick={() => tool === 'pixel' && fit()}
         onContextMenu={(e) => e.preventDefault()}
       />
-      <div className={notice ? 'hint notice' : 'hint'}>{notice ?? (focus ? EDITOR_HINT : HINTS[tool])}</div>
+      {(notice || !focus) && <div className={notice ? 'hint notice' : 'hint'}>{notice ?? HINTS[tool]}</div>}
     </div>
   );
 }

@@ -47,10 +47,10 @@ With the **Pixel** tool, hover over the image to preview a pixel's spectrum and 
 | Paint by hand | **Fine-tune** on the highlight's row, or the **Brush** tool on the main view |
 | Undo or redo | **Ctrl+Z**, **Ctrl+Shift+Z** |
 
-**Fine-tune** opens a close-up of one highlight with everything else dimmed and its exact edge drawn:
+**Fine-tune** opens a square crop around one highlight, as in the Segmentation app. The highlight keeps its real colours and everything else is dimmed, including other highlights, which are darkest because the brush can't paint over them. The crop's contrast is stretched to its own brightness range so dark leaves are easy to see; this only changes the display.
 
-- **A** adds, **D** erases, **[** and **]** change the brush size. Scroll to zoom, hold Space and drag to move, **Esc** or **Done** to return.
-- **Shrink 1 px** shaves the edge, to remove a background fringe.
+- **A** adds, **D** erases, **[** and **]** change the brush size. Scroll to zoom, hold Space and drag to move, **Esc** or **Done** to return. Painting stays inside the crop.
+- **Trim edge** shaves up to 50 pixels off the outline, to remove a background fringe. It counts from the outline as it was after your last brush stroke, so painted edges are trimmed too if you move it afterwards.
 - **Reset to automatic outline** discards the edits and outlines it again from your clicks.
 - **Undo** here only goes back to when you opened it, so it can't touch other highlights. Back in the main view, every step can be undone.
 
@@ -60,12 +60,14 @@ Add, leave-out and brush edits apply to the selected highlight. Choose one in th
 
 The first time you highlight something, the app offers to download SAM 2.1: **Base+** by default, or **Tiny** if you'd like a smaller download. You can switch in the toolbar. The download comes from Hugging Face once and is then kept by your browser. It runs on your graphics card where the browser offers WebGPU and on the processor otherwise.
 
-| Model | Download (GPU / processor) | Preparing an image on a processor |
+| Model | Download (GPU / processor) | Preparing an image on a 14-core processor |
 | ------ | ---------------------------- | --------------------------- |
-| Base+ | about 327 MB / 108 MB | about 10 s |
-| Tiny | about 155 MB / 61 MB | about 5 s |
+| Base+ | about 327 MB / 108 MB | about 1.5 s |
+| Tiny | about 155 MB / 61 MB | about 1 s |
 
-After that, each click takes a fraction of a second. On a graphics card, preparing an image takes under a second. On the processor the outlines are slightly less exact, because that model is stored at 8-bit precision.
+Once the model is downloaded, the app prepares each image in the background as soon as it opens, so highlighting is usually ready before you ask for it. Each click takes a fraction of a second. On a graphics card, preparing an image takes under a second.
+
+The processor figures use up to 12 threads, keeping two cores free. GitHub Pages can't send the headers that multi-threading needs, so a small service worker (`public/coi-sw.js`) adds them, and the page reloads once on a first visit. Where that isn't possible, such as after a hard reload or where service workers are blocked, the app runs on one thread, and Base+ takes about 10 s. On the processor the outlines are slightly less exact, because that model is stored at 8-bit precision.
 
 ### Saving
 

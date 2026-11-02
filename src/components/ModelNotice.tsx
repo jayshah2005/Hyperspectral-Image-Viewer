@@ -29,7 +29,7 @@ export function ModelNotice() {
         </p>
         <p className="muted">
           Your images are not uploaded.{' '}
-          {gpu === false && 'No usable graphics card was found, so it will run on the processor: about 10 seconds per image.'}
+          {gpu === false && 'No usable graphics card was found, so it will run on the processor: a few seconds per image on most computers.'}
         </p>
         <div className="row end">
           <button onClick={close}>Cancel</button>

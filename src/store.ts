@@ -11,9 +11,9 @@ import {
   type RegionPrompt,
 } from './lib/highlights';
 import { History } from './lib/history';
-import { applyBinaryMask, clearLabel, countLabel, decodeRle, encodeRle, erodeLabel, labelBounds, stampLine, type BrushMode } from './lib/mask';
+import { applyBinaryMask, applyTrim, clearLabel, countLabel, decodeRle, encodeRle, labelBounds, squareCrop, stampLine, trimField, type BrushMode, type TrimField } from './lib/mask';
 import type { DecodedMask } from './lib/maskFile';
-import { encodeSam2Image, getSam2Rgb, predictSam2, resetSam2Image } from './lib/sam2';
+import { encodeSam2Image, getSam2Rgb, predictSam2, resetSam2Image, samFilesCached } from './lib/sam2';
 import { DEFAULT_SAM_MODEL, SAM_MODELS, type SamBackend, type SamModelKey } from './lib/samModels';
 
 export type Tool = 'pixel' | 'point' | 'box' | 'select' | 'brush';
@@ -45,9 +45,6 @@ export interface MaskImportResult {
   /** Imported pixels left out because another highlight already holds them. */
   skipped: { name: string; pixels: number }[];
 }
-
-/** Space kept around the highlight when the editor opens, in image pixels. */
-const EDITOR_MARGIN = 48;
 
 interface Snapshot {
   rle: number[];
@@ -86,6 +83,8 @@ interface State {
   maskDirty: Rect | null;
   /** The editor, while it is open. */
   editor: EditorState | null;
+  /** The Trim edge slider: pixels shaved off since the last other edit. */
+  trimValue: number;
   /** Bumped when an edit is finished; statistics and the graph update. */
   statsRev: number;
   canUndo: boolean;
@@ -111,6 +110,8 @@ interface State {
   chooseModel: (model: SamModelKey) => void;
   acceptModel: () => void;
   prepareSam: () => Promise<boolean>;
+  /** Get the model ready before it's asked for, once it has been downloaded. */
+  prepareSamInBackground: () => Promise<void>;
   /** A plain click creates one object or selects the one under it; `add` and `exclude` refine the active object. */
   highlightAt: (x: number, y: number, mode?: ClickMode) => Promise<void>;
   highlightBox: (box: Box) => Promise<void>;
@@ -121,7 +122,7 @@ interface State {
   endStroke: () => void;
   togglePixel: (x: number, y: number) => void;
   renameRegion: (id: number, name: string) => void;
-  shrinkRegion: (id: number) => void;
+  trimRegion: (id: number, radius: number) => void;
   deleteRegion: (id: number) => void;
   clearHighlights: () => void;
   undo: () => void;
@@ -183,7 +184,9 @@ export const useStore = create<State>((set, get) => {
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
   let askedToPersist = false;
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
-  let stroke: { id: number; before: Snapshot; created: boolean; changed: boolean; dirty: Rect | null } | null = null;
+  let stroke: { id: number; before: Snapshot; created: boolean; changed: boolean; blocked: boolean } | null = null;
+  /** The outline the Trim edge slider measures from. Any other edit starts a new one. */
+  let trimBase: { id: number; field: TrimField } | null = null;
   /** Edits made in this editor session: its undo stops here, so it can't reach back to other highlights. */
   let editorEdits = 0;
 
@@ -240,8 +243,20 @@ export const useStore = create<State>((set, get) => {
     }
   };
 
+  const endTrim = () => {
+    trimBase = null;
+    set({ trimValue: 0 });
+  };
+
+  const editorRect = (id: number) => {
+    const { cube, labels } = get();
+    const b = cube && labels ? labelBounds(labels, id, cube.width) : null;
+    return b ? squareCrop(b, cube!.width, cube!.height) : null;
+  };
+
   const restore = (s: Snapshot) => {
     epoch++;
+    endTrim();
     get().labels!.set(decodeRle(s.rle, get().labels!.length));
     set({ regions: s.regions, nextId: s.nextId, activeRegion: s.activeRegion });
     syncHistory();
@@ -340,6 +355,7 @@ export const useStore = create<State>((set, get) => {
     maskRev: 0,
     maskDirty: null,
     editor: null,
+    trimValue: 0,
     statsRev: 0,
     canUndo: false,
     canRedo: false,
@@ -358,6 +374,7 @@ export const useStore = create<State>((set, get) => {
       if (saveTimer !== undefined) void saveNow();
       epoch++;
       stroke = null;
+      trimBase = null;
       history = new History<Snapshot>();
       resetSam2Image();
       const cubeId = get().cubeId + 1;
@@ -378,6 +395,8 @@ export const useStore = create<State>((set, get) => {
         maskRev: get().maskRev + 1,
         maskDirty: null,
         editor: null,
+        trimValue: 0,
+        loading: null,
         statsRev: get().statsRev + 1,
         canUndo: false,
         canRedo: false,
@@ -404,7 +423,7 @@ export const useStore = create<State>((set, get) => {
 
     chooseModel: (samModel) => {
       pref.set(MODEL_PREF, samModel);
-      set({ samModel, samReady: false, samBackend: null });
+      set({ samModel, samReady: false, samBackend: null, loading: null });
       if (usesSam(get().tool)) get().setTool(get().tool);
     },
 
@@ -423,8 +442,10 @@ export const useStore = create<State>((set, get) => {
         return false;
       }
       const current = () => get().cubeId === cubeId && get().samModel === samModel;
+      // It may already be under way in the background, which reports nothing itself.
+      if (!get().samReady) set({ loading: 'Preparing image for SAM 2…' });
       try {
-        const samBackend = await encodeSam2Image(rgb, samModel, String(cubeId), (loading) => {
+        const samBackend = await encodeSam2Image(rgb, samModel, String(cubeId), current, (loading) => {
           if (current()) set({ loading });
         });
         if (!current()) return false;
@@ -433,6 +454,19 @@ export const useStore = create<State>((set, get) => {
       } catch (e) {
         if (current()) set({ samReady: false, loading: null, error: `SAM 2 could not start: ${message(e)}` });
         return false;
+      }
+    },
+
+    prepareSamInBackground: async () => {
+      const { cubeId, samModel, samReady } = get();
+      const rgb = getSam2Rgb();
+      if (samReady || !rgb || !modelAccepted(samModel) || !(await samFilesCached(samModel))) return;
+      const current = () => get().cubeId === cubeId && get().samModel === samModel;
+      try {
+        const samBackend = await encodeSam2Image(rgb, samModel, String(cubeId), current);
+        if (current()) set({ samReady: true, samBackend });
+      } catch {
+        /* Nobody asked for it yet. If it's needed, trying again reports the problem. */
       }
     },
 
@@ -533,20 +567,25 @@ export const useStore = create<State>((set, get) => {
         id = addRegion().id;
         created = true;
       }
-      stroke = { id, before, created, changed: false, dirty: null };
+      stroke = { id, before, created, changed: false, blocked: false };
       return true;
     },
 
     paintStroke: (x0, y0, x1, y1) => {
-      const { cube, labels, brushMode, brushSize } = get();
+      const { cube, labels, brushMode, brushSize, editor } = get();
       if (!cube || !labels || !stroke) return;
-      if (!stampLine(labels, cube.width, cube.height, x0, y0, x1, y1, brushSize, stroke.id, brushMode)) return;
+      const under = labels[Math.floor(y1) * cube.width + Math.floor(x1)];
+      if (brushMode === 'add' && under && under !== stroke.id) stroke.blocked = true;
+      // In the editor, nothing may change outside the part on screen.
+      const r = editor?.rect;
+      const clip = r && { x0: r.x0, y0: r.y0, x1: r.x0 + r.w, y1: r.y0 + r.h };
+      if (!stampLine(labels, cube.width, cube.height, x0, y0, x1, y1, brushSize, stroke.id, brushMode, clip)) return;
       stroke.changed = true;
-      const r = brushSize / 2 + 1;
+      const pad = brushSize / 2 + 1;
       set({
         selected: null,
         maskRev: get().maskRev + 1,
-        maskDirty: { x0: Math.min(x0, x1) - r, y0: Math.min(y0, y1) - r, x1: Math.max(x0, x1) + r, y1: Math.max(y0, y1) + r },
+        maskDirty: { x0: Math.min(x0, x1) - pad, y0: Math.min(y0, y1) - pad, x1: Math.max(x0, x1) + pad, y1: Math.max(y0, y1) + pad },
       });
     },
 
@@ -554,6 +593,7 @@ export const useStore = create<State>((set, get) => {
       const s = stroke;
       stroke = null;
       if (!s || !get().labels) return;
+      if (s.blocked) notify('Another highlight already holds some of those pixels, so they were left alone.');
       if (!s.changed) {
         if (s.created) {
           removeRegion(s.id);
@@ -562,6 +602,7 @@ export const useStore = create<State>((set, get) => {
         return;
       }
       checkpoint(s.before);
+      endTrim();
       if (countLabel(get().labels!, s.id)) updateRegion(s.id, { edited: true });
       else removeRegion(s.id);
       committed();
@@ -590,13 +631,28 @@ export const useStore = create<State>((set, get) => {
       scheduleSave();
     },
 
-    shrinkRegion: (id) => {
-      const { cube, labels } = get();
+    trimRegion: (id, radius) => {
+      const { cube, labels, trimValue } = get();
       if (!cube || !labels) return;
-      checkpoint();
-      erodeLabel(labels, id, cube.width, cube.height);
-      if (countLabel(labels, id)) updateRegion(id, { edited: true });
-      else removeRegion(id);
+      if (trimBase?.id !== id) {
+        const field = radius ? trimField(labels, id, cube.width) : null;
+        if (!field?.maxTrim) return; // nothing asked for, or too thin to trim at all
+        checkpoint();
+        trimBase = { id, field };
+        updateRegion(id, { edited: true });
+      }
+      // Never trim a highlight away completely: the slider just stops.
+      const r = Math.min(radius, trimBase.field.maxTrim);
+      if (r === trimValue) return;
+      if (r === 0) {
+        // Back at the starting outline: as if it had never been touched.
+        get().undo();
+        history.clearRedo();
+        syncHistory();
+        return;
+      }
+      applyTrim(labels, id, cube.width, trimBase.field, r);
+      set({ trimValue: r });
       committed();
     },
 
@@ -619,7 +675,7 @@ export const useStore = create<State>((set, get) => {
     },
 
     undo: () => {
-      if (!get().labels || (get().editor && editorEdits <= 0)) return;
+      if (stroke || !get().labels || (get().editor && editorEdits <= 0)) return;
       const s = history.undo(snapshot());
       if (!s) return;
       editorEdits--;
@@ -627,7 +683,7 @@ export const useStore = create<State>((set, get) => {
     },
 
     redo: () => {
-      if (!get().labels) return;
+      if (stroke || !get().labels) return;
       const s = history.redo(snapshot());
       if (!s) return;
       editorEdits++;
@@ -637,23 +693,22 @@ export const useStore = create<State>((set, get) => {
     openEditor: (id) => {
       const { cube, labels, tool, samBusy } = get();
       if (!cube || !labels || samBusy) return;
-      const b = labelBounds(labels, id, cube.width);
-      if (!b) return;
-      const x0 = Math.max(0, b.x0 - EDITOR_MARGIN);
-      const y0 = Math.max(0, b.y0 - EDITOR_MARGIN);
-      const x1 = Math.min(cube.width, b.x1 + EDITOR_MARGIN);
-      const y1 = Math.min(cube.height, b.y1 + EDITOR_MARGIN);
+      const rect = editorRect(id);
+      if (!rect) return;
       editorEdits = 0;
+      endTrim();
       history.clearRedo();
-      set({ editor: { id, rect: { x0, y0, w: x1 - x0, h: y1 - y0 }, previousTool: tool }, activeRegion: id, tool: 'brush', selected: null, hovered: null });
+      set({ editor: { id, rect, previousTool: tool }, activeRegion: id, tool: 'brush', selected: null, hovered: null });
       syncHistory();
     },
 
     closeEditor: () => {
+      get().endStroke(); // Esc with the mouse still down: the canvas goes away before it hears the release
       const { editor } = get();
       if (!editor) return;
       // Plain set, not setTool: going back to a highlight tool must not start the model again.
-      set({ editor: null, tool: editor.previousTool, hovered: null, maskRev: get().maskRev + 1, maskDirty: null });
+      endTrim();
+      set({ editor: null, tool: editor.previousTool, hovered: null, maskRev: get().maskRev + 1, maskDirty: null, statsRev: get().statsRev + 1 });
       syncHistory();
       void saveNow();
     },
@@ -668,7 +723,13 @@ export const useStore = create<State>((set, get) => {
         if (!region || (!region.points.length && !region.box)) return;
         const before = snapshot();
         checkpoint(before);
+        endTrim();
         await outline(id, before, false, isCurrent);
+        // The automatic outline may reach beyond the part on screen, so frame it again.
+        const { editor } = get();
+        const rect = editor?.id === id ? editorRect(id) : null;
+        const old = editor?.rect;
+        if (editor && rect && old && (rect.x0 !== old.x0 || rect.y0 !== old.y0 || rect.w !== old.w || rect.h !== old.h)) set({ editor: { ...editor, rect } });
       });
     },
 

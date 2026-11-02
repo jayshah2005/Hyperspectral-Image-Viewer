@@ -1,11 +1,9 @@
 import * as Comlink from 'comlink';
 import { guessAxes, isCubeShape, squeeze, toBSQ } from '../loaders/arrayToCube';
 import { parseEnvi, parseEnviHeader } from '../loaders/envi';
-import { parseGeoTiff } from '../loaders/geotiff';
-import { openH5, type H5Handle } from '../loaders/hdf5';
+import type { H5Handle } from '../loaders/hdf5';
 import { isMat73, parseMatV5, type MatVariable } from '../loaders/mat';
 import { parseNpy, readNpyHeader } from '../loaders/npy';
-import { fromArrayBuffer } from 'geotiff';
 import { gunzipSync } from 'fflate';
 import type { Axes, Candidate, HyperCube, NdArray, OpenResult } from '../types';
 
@@ -74,6 +72,7 @@ async function open(files: File[]): Promise<OpenResult> {
   }
 
   if (e === 'tif' || e === 'tiff') {
+    const { fromArrayBuffer } = await import('geotiff');
     const tiff = await fromArrayBuffer(await file.arrayBuffer());
     const img = await tiff.getImage(0);
     const spp = img.getSamplesPerPixel();
@@ -93,6 +92,7 @@ async function open(files: File[]): Promise<OpenResult> {
       if (!candidates.length) throw new Error(`No 3-D numeric variables found in ${file.name}.`);
       return { sourceName, candidates };
     }
+    const { openH5 } = await import('../loaders/hdf5');
     const handle = await openH5(buf);
     const matlab = e === 'mat';
     source = { kind: 'h5', handle, matlab };
@@ -124,9 +124,11 @@ async function load(id: string, axes?: Axes): Promise<HyperCube> {
     case 'envi':
       cube = parseEnvi(source.header, await source.dataFile.arrayBuffer(), sourceName);
       break;
-    case 'tiff':
+    case 'tiff': {
+      const { parseGeoTiff } = await import('../loaders/geotiff');
       cube = await parseGeoTiff(await source.file.arrayBuffer(), sourceName);
       break;
+    }
     case 'npy':
       cube = ndToCube(parseNpy(await source.file.arrayBuffer()), axes, sourceName, false);
       break;
